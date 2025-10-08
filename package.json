@@ -8,14 +8,48 @@
     "lib",
     "dist"
   ],
-  "license": "MIT",
-  "scripts": {},
+  "author": "Naptie <naptie@qq.com>",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Naptie/koishi-plugin-nearcade.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Naptie/koishi-plugin-nearcade/issues"
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "lint": "eslint .",
+    "fl": "prettier --write . && eslint . --fix"
+  },
   "keywords": [
     "chatbot",
     "koishi",
-    "plugin"
+    "plugin",
+    "maimai",
+    "arcade",
+    "rhythm-games"
   ],
-  "devDependencies": {},
+  "koishi": {
+    "description": {
+      "en": "The official Koishi plugin for nearcade.",
+      "zh": "nearcade 官方 Koishi 插件。"
+    },
+    "service": {
+      "required": [
+        "database"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@eslint/compat": "^1.4.0",
+    "@eslint/js": "^9.37.0",
+    "eslint": "^9.37.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.4.0",
+    "prettier": "^3.6.2",
+    "typescript-eslint": "^8.46.0"
+  },
   "peerDependencies": {
     "koishi": "^4.18.7"
   }
