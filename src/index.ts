@@ -111,7 +111,7 @@ export const apply = (ctx: Context) => {
       registrantName: session.username,
       registeredAt: new Date().toISOString()
     });
-    return `机厅「${shop.name}」绑定成功，默认机台为「${defaultGame.name}」(${defaultGame.version}) (ID: ${defaultGame.gameId})。`;
+    return `机厅「${shop.name}」绑定成功，默认机台为「${defaultGame.name}」(${defaultGame.version})。`;
   };
 
   ctx.on('message', async (session) => {
@@ -213,7 +213,7 @@ export const apply = (ctx: Context) => {
               version: '未知版本'
             };
             await session.send(
-              `成功上报机厅「${arcade.names[0]}」的机台「${game.name}」(${game.version}) (ID: ${gameId}) 在勤人数为 ${count} 人。`
+              `成功上报机厅「${arcade.names[0]}」的机台「${game.name}」(${game.version}) 在勤人数为 ${count} 人。`
             );
           } else {
             await session.send(`上报机厅「${arcade.names[0]}」在勤人数失败：未知错误`);
@@ -411,7 +411,7 @@ export const apply = (ctx: Context) => {
       const game = shop.games.find((item) => item.gameId === gameId);
       if (!game) return '未找到对应的机台，请检查机台 ID 是否正确。';
       await ctx.database.set('arcades', { _id: arcade._id }, { defaultGame: game });
-      return `机厅「${arcade.names[0]}」的默认机台已成功设置为「${game.name}」(${game.version}) (ID: ${game.gameId})。`;
+      return `机厅「${arcade.names[0]}」的默认机台已成功设置为「${game.name}」(${game.version})。`;
     });
 
   ctx
@@ -444,7 +444,7 @@ export const apply = (ctx: Context) => {
       if (!newAliases.length) return '提供的别名均已存在或与其他机台冲突。';
       arcade.gameAliases.push({ gameId, aliases: newAliases });
       await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases: arcade.gameAliases });
-      return `机台「${game.name}」(${game.version}) (ID: ${game.gameId}) 已成功添加别名：${newAliases.join('，')}。`;
+      return `机台「${game.name}」(${game.version}) 已成功添加别名：${newAliases.join('，')}。`;
     });
 
   ctx
@@ -484,7 +484,7 @@ export const apply = (ctx: Context) => {
         arcade.gameAliases = arcade.gameAliases.filter((item) => item.gameId !== gameId);
       }
       await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases: arcade.gameAliases });
-      return `机台「${game.name}」(${game.version}) (ID: ${game.gameId}) 已成功删除别名：${existingAliases.join(
+      return `机台「${game.name}」(${game.version}) 已成功删除别名：${existingAliases.join(
         '，'
       )}。`;
     });
