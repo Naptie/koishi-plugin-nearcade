@@ -233,6 +233,9 @@ export const apply = (ctx: Context) => {
           id: shop.id,
           names: [shop.name]
         }));
+        if (!matched.length) {
+          return;
+        }
       }
       const arcadeQuery: ((typeof matched)[number] & {
         data?: AttendanceResponse;
