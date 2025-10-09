@@ -122,13 +122,16 @@ export const apply = (ctx: Context) => {
     }
   };
 
+  const printGame = ({ name, version }: { name: string; version: string }) =>
+    version ? `${name} (${version})` : name;
+
   const printArcades = (arcades: Arcade[]) =>
     arcades
       .map(
         (item) =>
           `- ${item.names[0]} ${item.source.toUpperCase()}/${item.id}` +
           `\n  别名：${item.names.slice(1).join('，') || '无'}` +
-          `\n  默认机台：${item.defaultGame.name} (${item.defaultGame.version}) (ID: ${item.defaultGame.gameId})` +
+          `\n  默认机台：${printGame(item.defaultGame)} (ID: ${item.defaultGame.gameId})` +
           `\n  由 ${item.registrantName} (${item.registrantId}) 绑定于 ${new Date(item.registeredAt).toLocaleString()}`
       )
       .join('\n');
@@ -160,7 +163,7 @@ export const apply = (ctx: Context) => {
       registrantName: session.username,
       registeredAt: new Date().toISOString()
     });
-    return `机厅「${shop.name}」绑定成功，默认机台为「${defaultGame.name}」(${defaultGame.version})。`;
+    return `机厅「${shop.name}」绑定成功，默认机台为「${printGame(defaultGame)}」。`;
   };
 
   const report = async (
@@ -202,7 +205,7 @@ export const apply = (ctx: Context) => {
         version: '未知版本'
       };
       await session.send(
-        `成功上报机厅「${arcade.name}」的机台「${game.name}」(${game.version}) 在勤人数为 ${count} 人。`
+        `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人。`
       );
       await createReport(arcade.source, arcade.id, session.userId, session.username);
     } else {
@@ -281,7 +284,7 @@ export const apply = (ctx: Context) => {
                         reported.some((r) => r.gameId === game.gameId) ||
                         registered.some((r) => r.gameId === game.gameId)
                     )
-                    .map((game) => `  - ${game.name} (${game.version}): ${game.total} 人`)
+                    .map((game) => `  - ${printGame(game)}: ${game.total} 人`)
                 );
               }
               return lines.join('\n');
@@ -501,12 +504,12 @@ export const apply = (ctx: Context) => {
         `机厅「${arcade.names[0]}」：\n` +
         `- ID：${arcade.source.toUpperCase()}/${arcade.id}\n` +
         `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` +
-        `- 默认机台：${arcade.defaultGame.name} (${arcade.defaultGame.version}) (ID: ${arcade.defaultGame.gameId})\n` +
+        `- 默认机台：${printGame(arcade.defaultGame)} (ID: ${arcade.defaultGame.gameId})\n` +
         `- 机台列表：\n` +
         shop.games
           .map(
             (game) =>
-              `  - ${game.name} (${game.version}) (ID: ${game.gameId}) ×${game.quantity}` +
+              `  - ${printGame(game)} (ID: ${game.gameId}) ×${game.quantity}` +
               `\n    别名：${arcade.gameAliases.find((item) => item.gameId === game.gameId)?.aliases.join('，') || '无'}`
           )
           .join('\n') +
@@ -540,7 +543,7 @@ export const apply = (ctx: Context) => {
       const game = shop.games.find((item) => item.gameId === gameId);
       if (!game) return '未找到对应的机台，请检查机台 ID 是否正确。';
       await ctx.database.set('arcades', { _id: arcade._id }, { defaultGame: game });
-      return `机厅「${arcade.names[0]}」的默认机台已成功设置为「${game.name}」(${game.version})。`;
+      return `机厅「${arcade.names[0]}」的默认机台已成功设置为「${printGame(game)}」。`;
     });
 
   ctx
@@ -573,7 +576,7 @@ export const apply = (ctx: Context) => {
       if (!newAliases.length) return '提供的别名均已存在或与其他机台冲突。';
       arcade.gameAliases.push({ gameId, aliases: newAliases });
       await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases: arcade.gameAliases });
-      return `机台「${game.name}」(${game.version}) 已成功添加别名：${newAliases.join('，')}。`;
+      return `机台「${printGame(game)}」已成功添加别名：${newAliases.join('，')}。`;
     });
 
   ctx
@@ -613,8 +616,6 @@ export const apply = (ctx: Context) => {
         arcade.gameAliases = arcade.gameAliases.filter((item) => item.gameId !== gameId);
       }
       await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases: arcade.gameAliases });
-      return `机台「${game.name}」(${game.version}) 已成功删除别名：${existingAliases.join(
-        '，'
-      )}。`;
+      return `机台「${printGame(game)}」已成功删除别名：${existingAliases.join('，')}。`;
     });
 };
