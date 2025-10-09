@@ -37,18 +37,24 @@ const gameTitles: Array<{ titleId: number; names: string[] }> = [
 
 const attendanceQuerySuffix = [
   'j',
+  'jk',
   'jr',
   'jgr',
   'dsr',
+  'yjk',
   'yjr',
   'yjgr',
+  'ydsk',
   'ydsr',
   '几',
+  '几卡',
   '几人',
   '几个人',
   '多少人',
+  '有几卡',
   '有几人',
   '有几个人',
+  '有多少卡',
   '有多少人'
 ].sort((a, b) => b.length - a.length);
 
@@ -158,11 +164,10 @@ export const apply = (ctx: Context) => {
     if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
       const suffix = attendanceQuerySuffix.find((suffix) => session.content.endsWith(suffix));
       const query = session.content.slice(0, -suffix!.length).trim();
-      if (!query) return;
       const arcades = await getArcadesByChannelId(session.channelId);
       if (!arcades.length) return;
       const matched = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
-      if (matched.length === 0 && !['机厅', 'jt'].includes(query)) return;
+      if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) return;
       const arcadeQuery: (Arcade & {
         data?: AttendanceResponse;
       })[] = matched.length > 0 ? matched : arcades;
