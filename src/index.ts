@@ -166,9 +166,24 @@ export const apply = (ctx: Context) => {
     if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
       const suffix = attendanceQuerySuffix.find((suffix) => session.content.endsWith(suffix));
       const query = session.content.slice(0, -suffix!.length).trim();
-      const matched = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
-      if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) return;
-      const arcadeQuery: (Arcade & {
+      let matched: {
+        source: string;
+        id: number;
+        names: string[];
+      }[] = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
+      if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) {
+        const result = await client.findArcades(query, 3);
+        if (typeof result === 'string') {
+          await session.send(`查询机厅失败：${result}`);
+          return;
+        }
+        matched = result.map((shop) => ({
+          source: shop.source,
+          id: shop.id,
+          names: [shop.name]
+        }));
+      }
+      const arcadeQuery: ((typeof matched)[number] & {
         data?: AttendanceResponse;
       })[] = matched.length > 0 ? matched : arcades;
       await Promise.all(

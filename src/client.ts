@@ -30,20 +30,20 @@ export class Client {
     return response.json() as Promise<T>;
   }
 
-  async findArcades(query: string) {
+  async findArcades(query: string, limit: number = 0) {
     let results: ShopsListResponse['shops'] = [];
     let hasNext = true;
     let page = 1;
     do {
       const response = await this.request<ShopsListResponse>(
-        `/shops?q=${encodeURIComponent(query)}&limit=50&page=${page++}`
+        `/shops?q=${encodeURIComponent(query)}&limit=${limit > 0 ? limit : 50}&page=${page++}`
       );
       if (typeof response === 'string') {
         return response;
       }
       results = results.concat(response.shops);
       hasNext = response.hasNextPage;
-    } while (hasNext);
+    } while (hasNext && limit <= 0);
     return results;
   }
 
