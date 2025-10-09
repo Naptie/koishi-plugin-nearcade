@@ -190,18 +190,19 @@ export const apply = (ctx: Context) => {
                   return `- 机厅「${arcade.names[0]}」在勤人数获取失败`;
                 }
                 const { total, games, reported, registered } = arcade.data;
-                const report = reported.at(0);
-                const reportedBySelf = report?.reportedBy === ctx.config.selfId;
-                console.log(report, ctx.config.selfId, reportedBySelf);
-                let reporter: string;
-                if (reportedBySelf) {
-                  const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
-                  reporter = `${reporterName} (${reporterId})`;
-                } else {
-                  reporter = report.reporter.displayName || `@${report.reporter.name}`;
+                const report = reported[0];
+                let reporter: string | null = null;
+                if (report) {
+                  const reportedBySelf = report.reportedBy === ctx.config.selfId;
+                  if (reportedBySelf) {
+                    const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
+                    reporter = `${reporterName} (${reporterId})`;
+                  } else {
+                    reporter = report.reporter.displayName || `@${report.reporter.name}`;
+                  }
                 }
                 const lines = [
-                  `- 机厅「${arcade.names[0]}」当前共有 ${total} 人在勤${report ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleString()}）` : ''}`
+                  `- 机厅「${arcade.names[0]}」当前共有 ${total} 人在勤${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleString()}）` : ''}`
                 ];
                 if (games.length) {
                   lines.push(
