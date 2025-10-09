@@ -133,6 +133,11 @@ export const apply = (ctx: Context) => {
       )
       .join('\n');
 
+  const getDefaultGame = (shop: Shop) =>
+    shop.games.sort((a, b) =>
+      a.titleId === b.titleId ? a.gameId - b.gameId : a.titleId - b.titleId
+    )[0];
+
   const bind = async (shop: Shop, aliases: string[] = [], session: Session) => {
     const exists = await ctx.database.get('arcades', {
       source: shop.source,
@@ -141,9 +146,7 @@ export const apply = (ctx: Context) => {
     });
     if (exists.length > 0)
       return `该机厅已由 ${exists[0].registrantName} (${exists[0].registrantId}) 绑定于 ${new Date(exists[0].registeredAt).toLocaleString()}，无需重复绑定。`;
-    const defaultGame = shop.games.sort((a, b) =>
-      a.titleId === b.titleId ? a.gameId - b.gameId : a.titleId - b.titleId
-    )[0];
+    const defaultGame = getDefaultGame(shop);
     if (!defaultGame) {
       return '该机厅未收录任何机台，无法绑定。';
     }
@@ -160,6 +163,55 @@ export const apply = (ctx: Context) => {
     return `机厅「${shop.name}」绑定成功，默认机台为「${defaultGame.name}」(${defaultGame.version})。`;
   };
 
+  const report = async (
+    countInput: number,
+    operator: '=' | '+' | '-',
+    gameId: number,
+    arcade: Shop,
+    session: Session
+  ) => {
+    let count = countInput;
+    if (operator === '+' || operator === '-') {
+      const attendance = await client.getAttendance(arcade.source, arcade.id);
+      if (typeof attendance === 'string') {
+        await session.send(`请求机厅「${arcade.name}」在勤人数失败：${attendance}`);
+        return;
+      }
+      const game = attendance.games.find((g) => g.gameId === gameId);
+      if (!game) {
+        await session.send(`机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`);
+        return;
+      }
+      count = Math.min(99, Math.max(0, operator === '+' ? game.total + count : game.total - count));
+    }
+    const group = session.event._data.group_name
+      ? `${session.event._data.group_name} (${session.channelId})`
+      : session.channelId;
+    const result = await client.reportAttendance(
+      arcade.source,
+      arcade.id,
+      gameId,
+      count,
+      `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
+    );
+    if (typeof result === 'string') {
+      await session.send(`上报机厅「${arcade.name}」在勤人数失败：${result}`);
+    } else if (result.success) {
+      const game = arcade.games.find((g) => g.gameId === gameId) || {
+        name: '未知机台',
+        version: '未知版本'
+      };
+      await session.send(
+        `成功上报机厅「${arcade.name}」的机台「${game.name}」(${game.version}) 在勤人数为 ${count} 人。`
+      );
+      await createReport(arcade.source, arcade.id, session.userId, session.username);
+    } else {
+      await session.send(`上报机厅「${arcade.name}」在勤人数失败：未知错误`);
+    }
+  };
+
+  const toForwarded = (text: string) => `<message forward>${text}</message>`;
+
   ctx.on('message', async (session) => {
     const arcades = await getArcadesByChannelId(session.channelId);
     if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
@@ -171,7 +223,7 @@ export const apply = (ctx: Context) => {
         names: string[];
       }[] = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
       if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) {
-        const result = await client.findArcades(query, 3);
+        const result = await client.findArcades(query);
         if (typeof result === 'string') {
           await session.send(`查询机厅失败：${result}`);
           return;
@@ -195,55 +247,55 @@ export const apply = (ctx: Context) => {
           arcade.data = result;
         })
       );
-      await session.send(
+      const message =
         '实时在勤情况：\n' +
-          (
-            await Promise.all(
-              arcadeQuery.map(async (arcade) => {
-                if (!arcade.data) {
-                  return `- 机厅「${arcade.names[0]}」在勤人数获取失败`;
+        (
+          await Promise.all(
+            arcadeQuery.map(async (arcade) => {
+              if (!arcade.data) {
+                return `- 机厅「${arcade.names[0]}」在勤人数获取失败`;
+              }
+              const { total, games, reported, registered } = arcade.data;
+              const report = reported[0];
+              let reporter: string | null = null;
+              if (report) {
+                const reportedBySelf = report.reportedBy === ctx.config.selfId;
+                if (reportedBySelf) {
+                  const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
+                  reporter = `${reporterName} (${reporterId})`;
+                } else {
+                  reporter = report.reporter.displayName || `@${report.reporter.name}`;
                 }
-                const { total, games, reported, registered } = arcade.data;
-                const report = reported[0];
-                let reporter: string | null = null;
-                if (report) {
-                  const reportedBySelf = report.reportedBy === ctx.config.selfId;
-                  if (reportedBySelf) {
-                    const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
-                    reporter = `${reporterName} (${reporterId})`;
-                  } else {
-                    reporter = report.reporter.displayName || `@${report.reporter.name}`;
-                  }
-                }
-                const lines = [
-                  `- 机厅「${arcade.names[0]}」当前有 ${total} 人在勤${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
-                ];
-                if (games.length) {
-                  lines.push(
-                    ...games
-                      .filter(
-                        (game) =>
-                          reported.some((r) => r.gameId === game.gameId) ||
-                          registered.some((r) => r.gameId === game.gameId)
-                      )
-                      .map((game) => `  - ${game.name} (${game.version}): ${game.total} 人`)
-                  );
-                }
-                return lines.join('\n');
-              })
-            )
-          ).join('\n')
-      );
+              }
+              const lines = [
+                `- 机厅「${arcade.names[0]}」当前有 ${total} 人在勤${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
+              ];
+              if (games.length) {
+                lines.push(
+                  ...games
+                    .filter(
+                      (game) =>
+                        reported.some((r) => r.gameId === game.gameId) ||
+                        registered.some((r) => r.gameId === game.gameId)
+                    )
+                    .map((game) => `  - ${game.name} (${game.version}): ${game.total} 人`)
+                );
+              }
+              return lines.join('\n');
+            })
+          )
+        ).join('\n');
+      await session.send(arcadeQuery.length > 5 ? toForwarded(message) : message);
       return;
     }
-    for (const operator of ['=', '+', '-']) {
+    for (const operator of ['=', '+', '-'] as const) {
       if (!session.content.includes(operator)) {
         continue;
       }
       const [left, right] = session.content.split(operator).map((s) => s.trim());
       if (!left || !right) continue;
-      const countInput = parseInt(right);
-      if (isNaN(countInput) || countInput < 0 || countInput > 99) return;
+      const count = parseInt(right);
+      if (isNaN(count) || count < 0 || count > 99) return;
       for (const arcade of arcades) {
         let gameId = arcade.defaultGame.gameId;
         let success = arcade.names.includes(left);
@@ -270,50 +322,29 @@ export const apply = (ctx: Context) => {
           }
         }
         if (success) {
-          let count = countInput;
-          if (operator === '+' || operator === '-') {
-            const attendance = await client.getAttendance(arcade.source, arcade.id);
-            if (typeof attendance === 'string') {
-              await session.send(`请求机厅「${arcade.names[0]}」在勤人数失败：${attendance}`);
-              return;
-            }
-            const game = attendance.games.find((g) => g.gameId === gameId);
-            if (!game) {
-              await session.send(`机厅「${arcade.names[0]}」不存在 ID 为 ${gameId} 的机台。`);
-              return;
-            }
-            count = Math.min(
-              99,
-              Math.max(0, operator === '+' ? game.total + count : game.total - count)
-            );
-          }
-          const group = session.event._data.group_name
-            ? `${session.event._data.group_name} (${session.channelId})`
-            : session.channelId;
-          const result = await client.reportAttendance(
-            arcade.source,
-            arcade.id,
-            gameId,
-            count,
-            `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
-          );
-          if (typeof result === 'string') {
-            await session.send(`上报机厅「${arcade.names[0]}」在勤人数失败：${result}`);
-          } else if (result.success) {
-            const game = arcadeData.shop.games.find((g) => g.gameId === gameId) || {
-              name: '未知机台',
-              version: '未知版本'
-            };
-            await session.send(
-              `成功上报机厅「${arcade.names[0]}」的机台「${game.name}」(${game.version}) 在勤人数为 ${count} 人。`
-            );
-            await createReport(arcade.source, arcade.id, session.userId, session.username);
-          } else {
-            await session.send(`上报机厅「${arcade.names[0]}」在勤人数失败：未知错误`);
-          }
-          break;
+          await report(count, operator, gameId, arcadeData.shop, session);
+          return;
         }
       }
+      const matched = await client.findArcades(left, 5);
+      if (typeof matched === 'string') {
+        await session.send(`查询机厅失败：${matched}`);
+        return;
+      }
+      if (matched.length === 0) return;
+      if (matched.length > 1) {
+        await session.send(
+          '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
+            matched.map((item) => `- ${item.name}`).join('\n')
+        );
+        return;
+      }
+      const defaultGame = getDefaultGame(matched[0]);
+      if (!defaultGame) {
+        await session.send(`机厅「${matched[0].name}」未收录任何机台，无法上报在勤人数。`);
+        return;
+      }
+      await report(count, operator, defaultGame.gameId, matched[0], session);
     }
   });
 
@@ -337,7 +368,7 @@ export const apply = (ctx: Context) => {
           shops.map((item, index) => `${index + 1}. ${item.name}`).join('\n') +
           '\n请输入对应的序号以绑定机厅，或发送“取消”以取消操作。序号后可附加数个空格间隔的机厅别名。';
         const forward = shops.length > 5;
-        await session.send(forward ? `<message forward>${message}</message>` : message);
+        await session.send(forward ? toForwarded(message) : message);
         const reply = await session.prompt();
         if (!reply) return '回复超时，操作已取消。';
         if (reply.trim() === '取消') return '操作已取消。';
