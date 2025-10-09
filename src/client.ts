@@ -26,7 +26,13 @@ export class Client {
       body: body ? JSON.stringify(body) : undefined
     });
     if (!response.ok) {
-      return response.text() as Promise<string>;
+      const respClone = response.clone();
+      try {
+        const data = await response.json();
+        return data.message || response.statusText;
+      } catch {
+        return (await respClone.text()) || response.statusText;
+      }
     }
     return response.json() as Promise<T>;
   }
