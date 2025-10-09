@@ -248,12 +248,15 @@ export const apply = (ctx: Context) => {
           }
         }
         if (success) {
+          const group = session.event._data.group_name
+            ? `${session.event._data.group_name} (${session.channelId})`
+            : session.channelId;
           const result = await client.reportAttendance(
             arcade.source,
             arcade.id,
             gameId,
             count,
-            `由 ${session.username} (${session.userId}) 从 QQ 群 ${session.event.channel.name} (${session.channelId}) 上报`
+            `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
           );
           if (typeof result === 'string') {
             await session.send(`上报机厅「${arcade.names[0]}」在勤人数失败：${result}`);
