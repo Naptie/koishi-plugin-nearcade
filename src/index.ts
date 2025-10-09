@@ -256,7 +256,7 @@ export const apply = (ctx: Context) => {
           await Promise.all(
             arcadeQuery.map(async (arcade) => {
               if (!arcade.data) {
-                return `- 机厅「${arcade.names[0]}」在勤人数获取失败`;
+                return `-「${arcade.names[0]}」在勤人数获取失败`;
               }
               const { total, games, reported, registered } = arcade.data;
               const report = reported[0];
@@ -271,7 +271,7 @@ export const apply = (ctx: Context) => {
                 }
               }
               const lines = [
-                `- 机厅「${arcade.names[0]}」当前有 ${total} 人在勤${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
+                `-「${arcade.names[0]}」${total} 人${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
               ];
               if (games.length) {
                 lines.push(
