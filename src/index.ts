@@ -161,11 +161,11 @@ export const apply = (ctx: Context) => {
   };
 
   ctx.on('message', async (session) => {
+    const arcades = await getArcadesByChannelId(session.channelId);
+    if (!arcades.length) return;
     if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
       const suffix = attendanceQuerySuffix.find((suffix) => session.content.endsWith(suffix));
       const query = session.content.slice(0, -suffix!.length).trim();
-      const arcades = await getArcadesByChannelId(session.channelId);
-      if (!arcades.length) return;
       const matched = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
       if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) return;
       const arcadeQuery: (Arcade & {
@@ -221,13 +221,14 @@ export const apply = (ctx: Context) => {
       );
       return;
     }
-    if (session.content.includes('=')) {
-      const [left, right] = session.content.split('=').map((s) => s.trim());
-      if (!left || !right) return;
-      const count = parseInt(right);
-      if (isNaN(count) || count < 0 || count > 99) return;
-      const arcades = await getArcadesByChannelId(session.channelId);
-      if (!arcades.length) return;
+    for (const operator of ['=', '+', '-']) {
+      if (!session.content.includes(operator)) {
+        continue;
+      }
+      const [left, right] = session.content.split(operator).map((s) => s.trim());
+      if (!left || !right) continue;
+      const countInput = parseInt(right);
+      if (isNaN(countInput) || countInput < 0 || countInput > 99) return;
       for (const arcade of arcades) {
         let gameId = arcade.defaultGame.gameId;
         let success = arcade.names.includes(left);
@@ -254,6 +255,23 @@ export const apply = (ctx: Context) => {
           }
         }
         if (success) {
+          let count = countInput;
+          if (operator === '+' || operator === '-') {
+            const attendance = await client.getAttendance(arcade.source, arcade.id);
+            if (typeof attendance === 'string') {
+              await session.send(`请求机厅「${arcade.names[0]}」在勤人数失败：${attendance}`);
+              return;
+            }
+            const game = attendance.games.find((g) => g.gameId === gameId);
+            if (!game) {
+              await session.send(`机厅「${arcade.names[0]}」不存在 ID 为 ${gameId} 的机台。`);
+              return;
+            }
+            count = Math.min(
+              99,
+              Math.max(0, operator === '+' ? game.total + count : game.total - count)
+            );
+          }
           const group = session.event._data.group_name
             ? `${session.event._data.group_name} (${session.channelId})`
             : session.channelId;
