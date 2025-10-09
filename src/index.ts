@@ -162,7 +162,6 @@ export const apply = (ctx: Context) => {
 
   ctx.on('message', async (session) => {
     const arcades = await getArcadesByChannelId(session.channelId);
-    if (!arcades.length) return;
     if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
       const suffix = attendanceQuerySuffix.find((suffix) => session.content.endsWith(suffix));
       const query = session.content.slice(0, -suffix!.length).trim();
