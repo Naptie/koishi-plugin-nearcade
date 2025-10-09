@@ -20,7 +20,8 @@ export class Client {
       method,
       headers: {
         Authorization: `Bearer ${this.apiToken}`,
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
       },
       body: body ? JSON.stringify(body) : undefined
     });
