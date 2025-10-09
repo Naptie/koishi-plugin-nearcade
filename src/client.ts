@@ -30,7 +30,7 @@ export class Client {
     return response.json() as Promise<T>;
   }
 
-  async findArcades(query: string, limit: number = 0) {
+  async findArcades(query: string, limit: number = 0, max: number = 300) {
     let results: ShopsListResponse['shops'] = [];
     let hasNext = true;
     let page = 1;
@@ -43,7 +43,7 @@ export class Client {
       }
       results = results.concat(response.shops);
       hasNext = response.hasNextPage;
-    } while (hasNext && limit <= 0);
+    } while (hasNext && limit <= 0 && results.length < max);
     return results;
   }
 
