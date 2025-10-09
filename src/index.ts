@@ -351,9 +351,10 @@ export const apply = (ctx: Context) => {
     .command('nearcade')
     .subcommand('unbind <name>')
     .alias('解绑机厅', '删除机厅', 'remove')
-    .action(async ({ session }, name) => {
+    .action(async ({ session }, ...segments) => {
       const arcades = await getArcadesByChannelId(session.channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
+      const name = segments.join(' ').trim();
       const matched = match(name, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
       if (matched.length > 1) {
@@ -433,9 +434,10 @@ export const apply = (ctx: Context) => {
     .command('nearcade')
     .subcommand('info <name>')
     .alias('机厅信息')
-    .action(async ({ session }, name) => {
+    .action(async ({ session }, ...segments) => {
       const arcades = await getArcadesByChannelId(session.channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
+      const name = segments.join(' ').trim();
       const matched = match(name, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
       if (matched.length > 1) {
