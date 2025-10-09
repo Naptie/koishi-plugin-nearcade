@@ -202,7 +202,7 @@ export const apply = (ctx: Context) => {
                   }
                 }
                 const lines = [
-                  `- 机厅「${arcade.names[0]}」当前共有 ${total} 人在勤${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleString()}）` : ''}`
+                  `- 机厅「${arcade.names[0]}」当前有 ${total} 人在勤${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
                 ];
                 if (games.length) {
                   lines.push(
