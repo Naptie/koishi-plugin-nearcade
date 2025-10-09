@@ -95,7 +95,7 @@ export const apply = (ctx: Context) => {
   };
 
   const getReport = async (source: string, id: number) => {
-    return ctx.database.get('attendanceReports', { source, id })[0];
+    return (await ctx.database.get('attendanceReports', { source, id }))[0];
   };
 
   const createReport = async (
@@ -187,6 +187,7 @@ export const apply = (ctx: Context) => {
                 const { total, games, reported, registered } = arcade.data;
                 const report = reported.at(0);
                 const reportedBySelf = report?.reportedBy === ctx.config.selfId;
+                console.log(report, ctx.config.selfId, reportedBySelf);
                 let reporter: string;
                 if (reportedBySelf) {
                   const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
