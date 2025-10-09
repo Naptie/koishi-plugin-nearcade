@@ -304,3 +304,11 @@ export interface Arcade {
   registrantName: string;
   registeredAt: string;
 }
+
+export interface AttendanceReport {
+  _id: number;
+  source: string;
+  id: number;
+  reporterId: string;
+  reporterName: string;
+}

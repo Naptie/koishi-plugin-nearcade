@@ -1,10 +1,11 @@
 import { Context, Schema, Session } from 'koishi';
 import { Client } from './client';
-import { Arcade, AttendanceResponse, Shop } from './types';
+import { Arcade, AttendanceReport, AttendanceResponse, Shop } from './types';
 
 declare module 'koishi' {
   interface Tables {
     arcades: Arcade;
+    attendanceReports: AttendanceReport;
   }
 }
 
@@ -14,11 +15,13 @@ export const inject = ['database'];
 export interface Config {
   apiBase: string;
   apiToken: string;
+  selfId: string;
 }
 
 export const Config: Schema<Config> = Schema.object({
-  apiBase: Schema.string().required().description('API 地址').role('url'),
-  apiToken: Schema.string().required().description('API 令牌').role('secret')
+  apiBase: Schema.string().required().description('nearcade API 地址').role('url'),
+  apiToken: Schema.string().required().description('nearcade API 令牌').role('secret'),
+  selfId: Schema.string().required().description('nearcade 用户 ID')
 });
 
 const gameTitles: Array<{ titleId: number; names: string[] }> = [
@@ -72,8 +75,45 @@ export const apply = (ctx: Context) => {
     }
   );
 
+  ctx.model.extend(
+    'attendanceReports',
+    {
+      _id: 'integer',
+      source: 'string',
+      id: 'integer',
+      reporterId: 'string',
+      reporterName: 'string'
+    },
+    {
+      primary: '_id',
+      autoInc: true
+    }
+  );
+
   const getArcadesByChannelId = (channelId: string) => {
     return ctx.database.get('arcades', { channelId });
+  };
+
+  const getReport = async (source: string, id: number) => {
+    return ctx.database.get('attendanceReports', { source, id })[0];
+  };
+
+  const createReport = async (
+    source: string,
+    id: number,
+    reporterId: string,
+    reporterName: string
+  ) => {
+    const existing = await ctx.database.get('attendanceReports', { source, id });
+    if (existing.length) {
+      await ctx.database.set(
+        'attendanceReports',
+        { _id: existing[0]._id },
+        { reporterId, reporterName }
+      );
+    } else {
+      await ctx.database.create('attendanceReports', { source, id, reporterId, reporterName });
+    }
   };
 
   const printArcades = (arcades: Arcade[]) =>
@@ -138,30 +178,40 @@ export const apply = (ctx: Context) => {
       );
       await session.send(
         '实时在勤情况：\n' +
-          arcadeQuery
-            .map((arcade) => {
-              if (!arcade.data) {
-                return `- 机厅「${arcade.names[0]}」在勤人数获取失败`;
-              }
-              const { total, games, reported, registered } = arcade.data;
-              const report = reported.at(0);
-              const lines = [
-                `- 机厅「${arcade.names[0]}」当前共有 ${total} 人在勤${report ? `（由 ${report.reporter.displayName || `@${report.reporter.name}`} 上报于 ${new Date(report.reportedAt).toLocaleString()}）` : ''}`
-              ];
-              if (games.length) {
-                lines.push(
-                  ...games
-                    .filter(
-                      (game) =>
-                        reported.some((r) => r.gameId === game.gameId) ||
-                        registered.some((r) => r.gameId === game.gameId)
-                    )
-                    .map((game) => `  - ${game.name} (${game.version}): ${game.total} 人`)
-                );
-              }
-              return lines.join('\n');
-            })
-            .join('\n')
+          (
+            await Promise.all(
+              arcadeQuery.map(async (arcade) => {
+                if (!arcade.data) {
+                  return `- 机厅「${arcade.names[0]}」在勤人数获取失败`;
+                }
+                const { total, games, reported, registered } = arcade.data;
+                const report = reported.at(0);
+                const reportedBySelf = report?.reportedBy === ctx.config.selfId;
+                let reporter: string;
+                if (reportedBySelf) {
+                  const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
+                  reporter = `${reporterName} (${reporterId})`;
+                } else {
+                  reporter = report.reporter.displayName || `@${report.reporter.name}`;
+                }
+                const lines = [
+                  `- 机厅「${arcade.names[0]}」当前共有 ${total} 人在勤${report ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleString()}）` : ''}`
+                ];
+                if (games.length) {
+                  lines.push(
+                    ...games
+                      .filter(
+                        (game) =>
+                          reported.some((r) => r.gameId === game.gameId) ||
+                          registered.some((r) => r.gameId === game.gameId)
+                      )
+                      .map((game) => `  - ${game.name} (${game.version}): ${game.total} 人`)
+                  );
+                }
+                return lines.join('\n');
+              })
+            )
+          ).join('\n')
       );
       return;
     }
@@ -215,6 +265,7 @@ export const apply = (ctx: Context) => {
             await session.send(
               `成功上报机厅「${arcade.names[0]}」的机台「${game.name}」(${game.version}) 在勤人数为 ${count} 人。`
             );
+            await createReport(arcade.source, arcade.id, session.userId, session.username);
           } else {
             await session.send(`上报机厅「${arcade.names[0]}」在勤人数失败：未知错误`);
           }
