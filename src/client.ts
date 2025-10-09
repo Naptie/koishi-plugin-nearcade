@@ -30,7 +30,7 @@ export class Client {
     return response.json() as Promise<T>;
   }
 
-  async findArcades(query: string, limit: number = 0, max: number = 300) {
+  async findArcades(query: string, limit: number = 0, max: number = 200) {
     let results: ShopsListResponse['shops'] = [];
     let hasNext = true;
     let page = 1;
