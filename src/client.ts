@@ -28,7 +28,7 @@ export class Client {
     if (!response.ok) {
       const respClone = response.clone();
       try {
-        const data = await response.json();
+        const data = (await response.json()) as { message?: string };
         return data.message || response.statusText;
       } catch {
         return (await respClone.text()) || response.statusText;
