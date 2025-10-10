@@ -1,6 +1,7 @@
-import { Context, Schema, Session } from 'koishi';
+import { Context, h, Schema, Session } from 'koishi';
 import { Client } from './client';
 import { Arcade, AttendanceReport, AttendanceResponse, Shop } from './types';
+import zhCN from '../locales/zh-CN.yml';
 
 declare module 'koishi' {
   interface Tables {
@@ -16,12 +17,16 @@ export interface Config {
   apiBase: string;
   apiToken: string;
   selfId: string;
+  helpMessage?: string;
+  helpOnMention?: boolean;
 }
 
 export const Config: Schema<Config> = Schema.object({
   apiBase: Schema.string().required().description('nearcade API 地址').role('url'),
   apiToken: Schema.string().required().description('nearcade API 令牌').role('secret'),
-  selfId: Schema.string().required().description('nearcade 用户 ID')
+  selfId: Schema.string().required().description('nearcade 用户 ID'),
+  helpMessage: Schema.string().description('帮助信息'),
+  helpOnMention: Schema.boolean().default(true).description('是否在提及 nearcade 时发送帮助信息')
 });
 
 const gameTitles: Array<{ titleId: number; names: string[] }> = [
@@ -95,6 +100,8 @@ export const apply = (ctx: Context) => {
       autoInc: true
     }
   );
+
+  ctx.i18n.define('zh-CN', zhCN);
 
   const getArcadesByChannelId = (channelId: string) => {
     return ctx.database.get('arcades', { channelId });
@@ -211,7 +218,19 @@ export const apply = (ctx: Context) => {
 
   const toForwarded = (text: string) => `<message forward>${text}</message>`;
 
+  const getHelpMessage = () => {
+    let message = h('img', { src: 'https://nearcade.phizone.cn/bot-help.png' });
+    if (ctx.config.helpMessage) {
+      message = h('p', ctx.config.helpMessage, message);
+    }
+    return message;
+  };
+
   ctx.on('message', async (session) => {
+    if (session.content.trim().toLowerCase() === 'nearcade' && ctx.config.helpOnMention !== false) {
+      await session.send(getHelpMessage());
+      return;
+    }
     const arcades = await getArcadesByChannelId(session.channelId);
     if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
       const suffix = attendanceQuerySuffix.find((suffix) => session.content.endsWith(suffix));
@@ -375,6 +394,10 @@ export const apply = (ctx: Context) => {
     await session.send(
       messages.length > 5 ? toForwarded(messages.join('\n')) : messages.join('\n')
     );
+  });
+
+  ctx.command('nearcade').action(() => {
+    return getHelpMessage();
   });
 
   ctx
