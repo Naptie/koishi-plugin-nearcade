@@ -63,6 +63,8 @@ const attendanceQuerySuffix = [
   '有多少人'
 ].sort((a, b) => b.length - a.length);
 
+const helpVersion = 1;
+
 export const apply = (ctx: Context) => {
   const client = new Client(ctx.config.apiBase, ctx.config.apiToken);
 
@@ -219,7 +221,7 @@ export const apply = (ctx: Context) => {
   const toForwarded = (text: string) => `<message forward>${text}</message>`;
 
   const getHelpMessage = () => {
-    let message = h('img', { src: 'https://nearcade.phizone.cn/bot-help.png' });
+    let message = h('img', { src: `https://nearcade.phizone.cn/bot-help.png?v=${helpVersion}` });
     if (ctx.config.helpMessage) {
       message = h('p', ctx.config.helpMessage, message);
     }
