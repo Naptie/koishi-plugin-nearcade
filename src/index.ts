@@ -177,13 +177,11 @@ export const apply = (ctx: Context) => {
     if (operator === '+' || operator === '-') {
       const attendance = await client.getAttendance(arcade.source, arcade.id);
       if (typeof attendance === 'string') {
-        await session.send(`请求机厅「${arcade.name}」在勤人数失败：${attendance}`);
-        return;
+        return `请求机厅「${arcade.name}」在勤人数失败：${attendance}`;
       }
       const game = attendance.games.find((g) => g.gameId === gameId);
       if (!game) {
-        await session.send(`机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`);
-        return;
+        return `机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`;
       }
       count = Math.min(99, Math.max(0, operator === '+' ? game.total + count : game.total - count));
     }
@@ -198,7 +196,7 @@ export const apply = (ctx: Context) => {
       `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
     );
     if (typeof result === 'string') {
-      await session.send(`上报机厅「${arcade.name}」在勤人数失败：${result}`);
+      return `上报机厅「${arcade.name}」在勤人数失败：${result}`;
     } else if (result.success) {
       const game = arcade.games.find((g) => g.gameId === gameId) || {
         name: '未知机台',
@@ -207,7 +205,7 @@ export const apply = (ctx: Context) => {
       await createReport(arcade.source, arcade.id, session.userId, session.username);
       return `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人。`;
     } else {
-      await session.send(`上报机厅「${arcade.name}」在勤人数失败：未知错误`);
+      return `上报机厅「${arcade.name}」在勤人数失败：未知错误`;
     }
   };
 
@@ -298,6 +296,7 @@ export const apply = (ctx: Context) => {
     const reportQueue: { count: number; operator: '=' | '+' | '-'; gameId: number; shop: Shop }[] =
       [];
     for (const line of session.content.split('\n')) {
+      console.log(line);
       for (const operator of ['=', '+', '-'] as const) {
         if (!line.includes(operator)) {
           continue;
@@ -305,7 +304,7 @@ export const apply = (ctx: Context) => {
         const [left, right] = line.split(operator).map((s) => s.trim());
         if (!left || !right) continue;
         const count = parseInt(right);
-        if (isNaN(count) || count < 0 || count > 99) return;
+        if (isNaN(count) || count < 0 || count > 99) break;
         for (const arcade of arcades) {
           let gameId = arcade.defaultGame.gameId;
           let success = arcade.names.includes(left);
@@ -338,26 +337,26 @@ export const apply = (ctx: Context) => {
               gameId,
               shop: arcadeData.shop
             });
-            return;
+            break;
           }
         }
         const matched = await client.findArcades(left, 5);
         if (typeof matched === 'string') {
           await session.send(`查询机厅失败：${matched}`);
-          return;
+          break;
         }
-        if (matched.length === 0) return;
+        if (matched.length === 0) break;
         if (matched.length > 1) {
           await session.send(
             '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
               matched.map((item) => `- ${item.name}`).join('\n')
           );
-          return;
+          break;
         }
         const defaultGame = getDefaultGame(matched[0]);
         if (!defaultGame) {
           await session.send(`机厅「${matched[0].name}」未收录任何机台，无法上报在勤人数。`);
-          return;
+          break;
         }
         reportQueue.push({
           count,
