@@ -224,6 +224,9 @@ export const apply = (ctx: Context) => {
         names: string[];
       }[] = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
       if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) {
+        if (query.length < 2) {
+          return;
+        }
         const result = await client.findArcades(query);
         if (typeof result === 'string') {
           await session.send(`查询机厅失败：${result}`);
