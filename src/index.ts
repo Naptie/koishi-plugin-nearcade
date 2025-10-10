@@ -296,7 +296,6 @@ export const apply = (ctx: Context) => {
     const reportQueue: { count: number; operator: '=' | '+' | '-'; gameId: number; shop: Shop }[] =
       [];
     for (const line of session.content.split('\n')) {
-      console.log(line);
       for (const operator of ['=', '+', '-'] as const) {
         if (!line.includes(operator)) {
           continue;
