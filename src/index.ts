@@ -324,7 +324,7 @@ export const apply = (ctx: Context) => {
         const [left, right] = line.split(operator).map((s) => s.trim());
         if (!left || !right) continue;
         const count = parseInt(right);
-        if (isNaN(count) || count < 0 || count > 99) break;
+        if (isNaN(count) || count < 0 || count > 99 || count.toString() !== right) break;
         let success = false;
         for (const arcade of arcades) {
           let gameId = arcade.defaultGame.gameId;
