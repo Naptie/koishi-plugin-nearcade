@@ -63,6 +63,11 @@ const attendanceQuerySuffix = [
   '有多少人'
 ].sort((a, b) => b.length - a.length);
 
+const attendanceOperators = ['=', '＝', '🟰', '+', '＋', '➕', '-', '－', '➖'] as const;
+
+const isPlus = (op: string) => ['+', '＋', '➕'].includes(op);
+const isMinus = (op: string) => ['-', '－', '➖'].includes(op);
+
 const helpVersion = 1;
 
 export const apply = (ctx: Context) => {
@@ -177,13 +182,13 @@ export const apply = (ctx: Context) => {
 
   const report = async (
     countInput: number,
-    operator: '=' | '+' | '-',
+    operator: (typeof attendanceOperators)[number],
     gameId: number,
     arcade: Shop,
     session: Session
   ) => {
     let count = countInput;
-    if (operator === '+' || operator === '-') {
+    if (isPlus(operator) || isMinus(operator)) {
       const attendance = await client.getAttendance(arcade.source, arcade.id);
       if (typeof attendance === 'string') {
         return `请求机厅「${arcade.name}」在勤人数失败：${attendance}`;
@@ -192,7 +197,7 @@ export const apply = (ctx: Context) => {
       if (!game) {
         return `机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`;
       }
-      count = Math.min(99, Math.max(0, operator === '+' ? game.total + count : game.total - count));
+      count = Math.min(99, Math.max(0, isPlus(operator) ? game.total + count : game.total - count));
     }
     const group = session.event._data.group_name
       ? `${session.event._data.group_name} (${session.channelId})`
@@ -314,10 +319,14 @@ export const apply = (ctx: Context) => {
       await session.send(arcadeQuery.length > 5 ? toForwarded(message) : message);
       return;
     }
-    const reportQueue: { count: number; operator: '=' | '+' | '-'; gameId: number; shop: Shop }[] =
-      [];
+    const reportQueue: {
+      count: number;
+      operator: (typeof attendanceOperators)[number];
+      gameId: number;
+      shop: Shop;
+    }[] = [];
     for (const line of session.content.split('\n')) {
-      for (const operator of ['=', '+', '-'] as const) {
+      for (const operator of attendanceOperators) {
         if (!line.includes(operator)) {
           continue;
         }
