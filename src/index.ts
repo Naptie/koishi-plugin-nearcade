@@ -486,7 +486,7 @@ export const apply = (ctx: Context) => {
   };
 
   const matchWithAliases = (name: string, aliases: string[], arcades: Arcade[]) => {
-    let matched = [];
+    let matched: Arcade[] = [];
     do {
       matched = match(name, arcades);
       if (matched.length) break;
@@ -547,36 +547,60 @@ export const apply = (ctx: Context) => {
     .alias('机厅信息')
     .action(async ({ session }, ...segments) => {
       const arcades = await getArcadesByChannelId(session.channelId);
-      if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       const name = segments.join(' ').trim();
-      const matched = match(name, arcades);
-      if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
+      let matched: Arcade[] | Shop[] = match(name, arcades);
       if (matched.length > 1) {
         return '找到多个匹配的机厅，请使用更具体的名称或别名：\n' + printArcades(matched);
       }
-      const arcade = matched[0];
-      const result = await client.getArcade(arcade.source, arcade.id);
-      if (typeof result === 'string') {
-        return `请求失败：${result}`;
+      if (!matched.length) {
+        const result = await client.findArcades(name, 5);
+        if (typeof result === 'string') {
+          return `请求失败：${result}`;
+        }
+        if (!result.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
+        if (result.length > 1) {
+          return (
+            '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
+            result.map((item) => `- ${item.name}`).join('\n')
+          );
+        }
+        matched = result;
       }
-      const { shop } = result;
+      const arcade = matched[0];
+      let shop: Shop;
+      if ('names' in arcade) {
+        const result = await client.getArcade(arcade.source, arcade.id);
+        if (typeof result === 'string') {
+          return `请求失败：${result}`;
+        }
+        shop = result.shop;
+      } else {
+        shop = arcade;
+      }
       return (
-        `机厅「${arcade.names[0]}」：\n` +
-        `- ID：${arcade.source.toUpperCase()}/${arcade.id}\n` +
-        `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` +
-        `- 默认机台：${printGame(arcade.defaultGame)} (ID: ${arcade.defaultGame.gameId})\n` +
+        `机厅「${shop.name}」：\n` +
+        `- ID：${shop.source.toUpperCase()}/${shop.id}\n` +
+        ('names' in arcade
+          ? `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` +
+            `- 默认机台：${printGame(arcade.defaultGame)} (ID: ${arcade.defaultGame.gameId})\n`
+          : '') +
         `- 机台列表：\n` +
         shop.games
           .map(
             (game) =>
               `  - ${printGame(game)} (ID: ${game.gameId}) ×${game.quantity}` +
-              `\n    别名：${arcade.gameAliases.find((item) => item.gameId === game.gameId)?.aliases.join('，') || '无'}`
+              ('gameAliases' in arcade
+                ? `\n    别名：${arcade.gameAliases.find((item) => item.gameId === game.gameId)?.aliases.join('，') || '无'}`
+                : '')
           )
           .join('\n') +
         `\n` +
         `- 地址：${shop.source === 'ziv' ? `${shop.address.detailed} / ${shop.address.general.toReversed().join(', ')}` : `${shop.address.general.join('·')} / ${shop.address.detailed}`}\n` +
-        `- 更多信息：https://nearcade.phizone.cn/shops/${shop.source}/${shop.id}\n` +
-        `- 由 ${arcade.registrantName} (${arcade.registrantId}) 绑定于 ${new Date(arcade.registeredAt).toLocaleString()}`
+        `- 更多信息：https://nearcade.phizone.cn/shops/${shop.source}/${shop.id}` +
+        ('registrantId' in arcade
+          ? '\n' +
+            `- 由 ${arcade.registrantName} (${arcade.registrantId}) 绑定于 ${new Date(arcade.registeredAt).toLocaleString()}`
+          : '')
       );
     });
 
