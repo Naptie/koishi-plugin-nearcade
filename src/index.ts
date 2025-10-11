@@ -325,9 +325,10 @@ export const apply = (ctx: Context) => {
         if (!left || !right) continue;
         const count = parseInt(right);
         if (isNaN(count) || count < 0 || count > 99) break;
+        let success = false;
         for (const arcade of arcades) {
           let gameId = arcade.defaultGame.gameId;
-          let success = arcade.names.includes(left);
+          success = arcade.names.includes(left);
           const arcadeData = await client.getArcade(arcade.source, arcade.id);
           if (typeof arcadeData === 'string') continue;
           if (!success) {
@@ -360,30 +361,32 @@ export const apply = (ctx: Context) => {
             break;
           }
         }
-        const matched = await client.findArcades(left, 5);
-        if (typeof matched === 'string') {
-          await session.send(`查询机厅失败：${matched}`);
-          break;
+        if (!success) {
+          const matched = await client.findArcades(left, 5);
+          if (typeof matched === 'string') {
+            await session.send(`查询机厅失败：${matched}`);
+            break;
+          }
+          if (matched.length === 0) break;
+          if (matched.length > 1) {
+            await session.send(
+              '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
+                matched.map((item) => `- ${item.name}`).join('\n')
+            );
+            break;
+          }
+          const defaultGame = getDefaultGame(matched[0]);
+          if (!defaultGame) {
+            await session.send(`机厅「${matched[0].name}」未收录任何机台，无法上报在勤人数。`);
+            break;
+          }
+          reportQueue.push({
+            count,
+            operator,
+            gameId: defaultGame.gameId,
+            shop: matched[0]
+          });
         }
-        if (matched.length === 0) break;
-        if (matched.length > 1) {
-          await session.send(
-            '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
-              matched.map((item) => `- ${item.name}`).join('\n')
-          );
-          break;
-        }
-        const defaultGame = getDefaultGame(matched[0]);
-        if (!defaultGame) {
-          await session.send(`机厅「${matched[0].name}」未收录任何机台，无法上报在勤人数。`);
-          break;
-        }
-        reportQueue.push({
-          count,
-          operator,
-          gameId: defaultGame.gameId,
-          shop: matched[0]
-        });
       }
     }
     const messages = (
