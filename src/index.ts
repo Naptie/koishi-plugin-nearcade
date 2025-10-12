@@ -1,12 +1,19 @@
 import { Context, h, Schema, Session } from 'koishi';
 import { Client } from './client';
-import { Arcade, AttendanceReport, AttendanceResponse, Shop } from './types';
+import {
+  Arcade,
+  AttendanceReport,
+  AttendanceResponse,
+  CustomAttendanceReport,
+  Shop
+} from './types';
 import zhCN from '../locales/zh-CN.yml';
 
 declare module 'koishi' {
   interface Tables {
     arcades: Arcade;
     attendanceReports: AttendanceReport;
+    customAttendanceReports: CustomAttendanceReport;
   }
 }
 
@@ -19,6 +26,7 @@ export interface Config {
   selfId: string;
   helpMessage?: string;
   helpOnMention?: boolean;
+  customShops?: { id: number; aliases: string[] }[];
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -26,7 +34,15 @@ export const Config: Schema<Config> = Schema.object({
   apiToken: Schema.string().required().description('nearcade API 令牌').role('secret'),
   selfId: Schema.string().required().description('nearcade 用户 ID'),
   helpMessage: Schema.string().description('帮助信息'),
-  helpOnMention: Schema.boolean().default(true).description('是否在提及 nearcade 时发送帮助信息')
+  helpOnMention: Schema.boolean().default(true).description('是否在提及 nearcade 时发送帮助信息'),
+  customShops: Schema.array(
+    Schema.object({
+      id: Schema.number().required().description('机厅 ID'),
+      aliases: Schema.array(Schema.string()).required().description('机厅别名')
+    })
+  )
+    .default([])
+    .description('自定义机厅列表')
 });
 
 const gameTitles: Array<{ titleId: number; names: string[] }> = [
@@ -101,6 +117,23 @@ export const apply = (ctx: Context) => {
       id: 'integer',
       reporterId: 'string',
       reporterName: 'string'
+    },
+    {
+      primary: '_id',
+      autoInc: true
+    }
+  );
+
+  ctx.model.extend(
+    'customAttendanceReports',
+    {
+      _id: 'integer',
+      shop: 'integer',
+      count: 'integer',
+      channelId: 'string',
+      reporterId: 'string',
+      reporterName: 'string',
+      reportedAt: 'string'
     },
     {
       primary: '_id',
@@ -183,43 +216,71 @@ export const apply = (ctx: Context) => {
   const report = async (
     countInput: number,
     operator: (typeof attendanceOperators)[number],
-    gameId: number,
-    arcade: Shop,
+    gameId: number | undefined,
+    arcade: Shop | Config['customShops'][number],
     session: Session
   ) => {
     let count = countInput;
     if (isPlus(operator) || isMinus(operator)) {
-      const attendance = await client.getAttendance(arcade.source, arcade.id);
-      if (typeof attendance === 'string') {
-        return `请求机厅「${arcade.name}」在勤人数失败：${attendance}`;
+      let existing: number;
+      if ('aliases' in arcade) {
+        const report = (
+          await ctx.database.get('customAttendanceReports', {
+            shop: arcade.id,
+            channelId: session.channelId
+          })
+        )[0];
+        existing = report?.count || 0;
+      } else {
+        const attendance = await client.getAttendance(arcade.source, arcade.id);
+        if (typeof attendance === 'string') {
+          return `请求机厅「${arcade.name}」在勤人数失败：${attendance}`;
+        }
+        const game = attendance.games.find((g) => g.gameId === gameId);
+        if (!game) {
+          return `机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`;
+        }
+        existing = game.total;
       }
-      const game = attendance.games.find((g) => g.gameId === gameId);
-      if (!game) {
-        return `机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`;
-      }
-      count = Math.min(99, Math.max(0, isPlus(operator) ? game.total + count : game.total - count));
+      count = Math.min(99, Math.max(0, isPlus(operator) ? existing + count : existing - count));
     }
-    const group = session.event._data.group_name
-      ? `${session.event._data.group_name} (${session.channelId})`
-      : session.channelId;
-    const result = await client.reportAttendance(
-      arcade.source,
-      arcade.id,
-      gameId,
-      count,
-      `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
-    );
-    if (typeof result === 'string') {
-      return `上报机厅「${arcade.name}」在勤人数失败：${result}`;
-    } else if (result.success) {
-      const game = arcade.games.find((g) => g.gameId === gameId) || {
-        name: '未知机台',
-        version: '未知版本'
-      };
-      await createReport(arcade.source, arcade.id, session.userId, session.username);
-      return `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人。`;
+    if ('aliases' in arcade) {
+      await ctx.database.remove('customAttendanceReports', {
+        shop: arcade.id,
+        channelId: session.channelId
+      });
+      await ctx.database.create('customAttendanceReports', {
+        shop: arcade.id,
+        channelId: session.channelId,
+        count,
+        reporterId: session.userId,
+        reporterName: session.username,
+        reportedAt: new Date().toISOString()
+      });
+      return `成功上报机厅「${arcade.aliases[0]}」在勤人数为 ${count} 人。`;
     } else {
-      return `上报机厅「${arcade.name}」在勤人数失败：未知错误`;
+      const group = session.event._data.group_name
+        ? `${session.event._data.group_name} (${session.channelId})`
+        : session.channelId;
+      const result = await client.reportAttendance(
+        arcade.source,
+        arcade.id,
+        gameId,
+        count,
+        `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
+      );
+      if (typeof result === 'string') {
+        return `上报机厅「${arcade.name}」在勤人数失败：${result}`;
+      } else if (result.success) {
+        const game = arcade.games.find((g) => g.gameId === gameId) || {
+          name: '未知机台',
+          version: '未知版本'
+        };
+        await createReport(arcade.source, arcade.id, session.userId, session.username);
+        return `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人。`;
+      } else {
+        return `上报机厅「${arcade.name}」在勤人数失败：未知错误`;
+      }
     }
   };
 
@@ -239,9 +300,14 @@ export const apply = (ctx: Context) => {
       return;
     }
     const arcades = await getArcadesByChannelId(session.channelId);
-    if (attendanceQuerySuffix.some((suffix) => session.content.endsWith(suffix))) {
-      const suffix = attendanceQuerySuffix.find((suffix) => session.content.endsWith(suffix));
-      const query = session.content.slice(0, -suffix!.length).trim();
+    if (attendanceQuerySuffix.some((suffix) => session.content.toLowerCase().endsWith(suffix))) {
+      const suffix = attendanceQuerySuffix.find((suffix) =>
+        session.content.toLowerCase().endsWith(suffix)
+      );
+      const query = session.content.slice(0, -suffix!.length).trim().toLowerCase();
+      const customShop = ctx.config.customShops.find((shop: Config['customShops'][number]) =>
+        shop.aliases.some((alias) => alias.trim().toLowerCase() === query)
+      ) as Config['customShops'][number];
       let matched: {
         source: string;
         id: number;
@@ -261,15 +327,43 @@ export const apply = (ctx: Context) => {
           id: shop.id,
           names: [shop.name]
         }));
-        if (!matched.length) {
+        if (!matched.length && !customShop) {
           return;
         }
       }
-      const arcadeQuery: ((typeof matched)[number] & {
+      const arcadeQuery: (((typeof matched)[number] | Config['customShops'][number]) & {
         data?: AttendanceResponse;
-      })[] = matched.length > 0 ? matched : arcades;
+        customReporter?: {
+          id: string;
+          name: string;
+          time: string;
+        };
+      })[] = customShop ? [customShop] : matched.length > 0 ? matched : arcades;
       await Promise.all(
         arcadeQuery.map(async (arcade) => {
+          if (!('source' in arcade && 'id' in arcade)) {
+            const report = (
+              await ctx.database.get('customAttendanceReports', {
+                shop: arcade.id,
+                channelId: session.channelId
+              })
+            )[0];
+            arcade.data = {
+              success: true,
+              total: report?.count || 0,
+              games: [],
+              registered: [],
+              reported: []
+            };
+            arcade.customReporter = report
+              ? {
+                  id: report.reporterId,
+                  name: report.reporterName,
+                  time: report.reportedAt
+                }
+              : undefined;
+            return;
+          }
           const result = await client.getAttendance(arcade.source, arcade.id);
           if (typeof result === 'string') {
             await session.send(`请求机厅「${arcade.names[0]}」在勤人数失败：${result}`);
@@ -284,9 +378,13 @@ export const apply = (ctx: Context) => {
           await Promise.all(
             arcadeQuery.map(async (arcade) => {
               if (!arcade.data) {
-                return `-「${arcade.names[0]}」在勤人数获取失败`;
+                return `-「${('names' in arcade ? arcade.names : arcade.aliases)[0]}」在勤人数获取失败`;
               }
               const { total, games, reported, registered } = arcade.data;
+              if ('aliases' in arcade) {
+                const reporter = arcade.customReporter;
+                return `-「${arcade.aliases[0]}」${total} 人${reporter ? `（由 ${reporter.name} (${reporter.id}) 上报于 ${new Date(reporter.time).toLocaleTimeString()}）` : ''}`;
+              }
               const report = reported[0];
               let reporter: string | null = null;
               if (report) {
@@ -322,8 +420,8 @@ export const apply = (ctx: Context) => {
     const reportQueue: {
       count: number;
       operator: (typeof attendanceOperators)[number];
-      gameId: number;
-      shop: Shop;
+      gameId?: number;
+      shop: Shop | Config['customShops'][number];
     }[] = [];
     for (const line of session.content.split('\n')) {
       for (const operator of attendanceOperators) {
@@ -333,7 +431,23 @@ export const apply = (ctx: Context) => {
         const [left, right] = line.split(operator).map((s) => s.trim());
         if (!left || !right) continue;
         const count = parseInt(right);
-        if (isNaN(count) || count < 0 || count > 99 || count.toString() !== right) break;
+        const customShop = ctx.config.customShops.find((shop: Config['customShops'][number]) =>
+          shop.aliases.some((alias) => alias.trim().toLowerCase() === left)
+        ) as Config['customShops'][number];
+        if (
+          isNaN(count) ||
+          count < 0 ||
+          count > (customShop ? Infinity : 99) ||
+          count.toString() !== right
+        )
+          break;
+        if (customShop) {
+          reportQueue.push({
+            count,
+            operator,
+            shop: customShop
+          });
+        }
         let success = false;
         for (const arcade of arcades) {
           let gameId = arcade.defaultGame.gameId;

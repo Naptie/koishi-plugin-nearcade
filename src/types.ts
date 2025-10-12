@@ -312,3 +312,13 @@ export interface AttendanceReport {
   reporterId: string;
   reporterName: string;
 }
+
+export interface CustomAttendanceReport {
+  _id: number;
+  shop: number;
+  channelId: string;
+  count: number;
+  reporterId: string;
+  reporterName: string;
+  reportedAt: string;
+}
