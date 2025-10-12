@@ -68,7 +68,7 @@ const attendanceOperators = ['=', '＝', '🟰', '+', '＋', '➕', '-', '－', 
 const isPlus = (op: string) => ['+', '＋', '➕'].includes(op);
 const isMinus = (op: string) => ['-', '－', '➖'].includes(op);
 
-const helpVersion = 1;
+const helpVersion = 2;
 
 export const apply = (ctx: Context) => {
   const client = new Client(ctx.config.apiBase, ctx.config.apiToken);
@@ -177,7 +177,7 @@ export const apply = (ctx: Context) => {
       registrantName: session.username,
       registeredAt: new Date().toISOString()
     });
-    return `机厅「${shop.name}」绑定成功，默认机台为「${printGame(defaultGame)}」。`;
+    return `机厅「${shop.name}」成功绑定至当前群聊。\n别名：${aliases.join('，') || '无'}\n默认机台：${printGame(defaultGame)}`;
   };
 
   const report = async (
@@ -416,9 +416,10 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('bind <query> [...aliases]')
+    .subcommand('bind <query>')
     .alias('绑定机厅', '添加机厅', 'add')
-    .action(async ({ session }, query, ...initialAliases) => {
+    .action(async ({ session }, ...segments) => {
+      const query = segments.join(' ');
       const result = await client.findArcades(query);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
@@ -427,7 +428,12 @@ export const apply = (ctx: Context) => {
       if (!shops.length) return '未查询到相关机厅';
       if (shops.length === 1) {
         const shop = shops[0];
-        return bind(shop, initialAliases, session);
+        await session.send(
+          `查询到唯一机厅「${shop.name}」，请提供数个空格间隔的机厅别名，或发送句号以跳过别名设置。`
+        );
+        const reply = await session.prompt();
+        const aliases = ['。', '.'].includes(reply.trim()) ? [] : reply.trim().split(/\s+/);
+        return bind(shop, aliases, session);
       } else {
         const message =
           `查询到以下机厅（共 ${shops.length} 家）：\n` +
@@ -444,7 +450,7 @@ export const apply = (ctx: Context) => {
           return '无效的序号，操作已取消。';
         }
         const shop = shops[index - 1];
-        return bind(shop, aliases?.length ? aliases : initialAliases, session);
+        return bind(shop, aliases, session);
       }
     });
 
