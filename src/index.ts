@@ -418,7 +418,7 @@ export const apply = (ctx: Context) => {
     .command('nearcade')
     .subcommand('bind <query> [...aliases]')
     .alias('绑定机厅', '添加机厅', 'add')
-    .action(async ({ session }, query, ...aliases) => {
+    .action(async ({ session }, query, ...initialAliases) => {
       const result = await client.findArcades(query);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
@@ -427,7 +427,7 @@ export const apply = (ctx: Context) => {
       if (!shops.length) return '未查询到相关机厅';
       if (shops.length === 1) {
         const shop = shops[0];
-        return bind(shop, aliases, session);
+        return bind(shop, initialAliases, session);
       } else {
         const message =
           `查询到以下机厅（共 ${shops.length} 家）：\n` +
@@ -444,7 +444,7 @@ export const apply = (ctx: Context) => {
           return '无效的序号，操作已取消。';
         }
         const shop = shops[index - 1];
-        return bind(shop, aliases, session);
+        return bind(shop, aliases?.length ? aliases : initialAliases, session);
       }
     });
 
