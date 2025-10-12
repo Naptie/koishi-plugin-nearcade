@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-nearcade",
   "description": "The official Koishi plugin for nearcade.",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
