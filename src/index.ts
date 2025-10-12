@@ -222,7 +222,6 @@ export const apply = (ctx: Context) => {
   ) => {
     let count = countInput;
     if (isPlus(operator) || isMinus(operator)) {
-      let existing: number;
       if ('aliases' in arcade) {
         const report = (
           await ctx.database.get('customAttendanceReports', {
@@ -230,7 +229,8 @@ export const apply = (ctx: Context) => {
             channelId: session.channelId
           })
         )[0];
-        existing = report?.count || 0;
+        const existing = report?.count || 0;
+        count = Math.max(0, isPlus(operator) ? existing + count : existing - count);
       } else {
         const attendance = await client.getAttendance(arcade.source, arcade.id);
         if (typeof attendance === 'string') {
@@ -240,9 +240,9 @@ export const apply = (ctx: Context) => {
         if (!game) {
           return `机厅「${arcade.name}」不存在 ID 为 ${gameId} 的机台。`;
         }
-        existing = game.total;
+        const existing = game.total;
+        count = Math.min(99, Math.max(0, isPlus(operator) ? existing + count : existing - count));
       }
-      count = Math.min(99, Math.max(0, isPlus(operator) ? existing + count : existing - count));
     }
     if ('aliases' in arcade) {
       await ctx.database.remove('customAttendanceReports', {
