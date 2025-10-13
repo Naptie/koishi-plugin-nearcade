@@ -37,6 +37,85 @@ export interface AttendanceReportResponse {
   success: boolean;
 }
 
+export interface DiscoverResponse {
+  /**
+   * 原点
+   */
+  location: ResponseLocation;
+  /**
+   * 范围半径
+   */
+  radius: number;
+  /**
+   * 店铺列表
+   */
+  shops: (Shop & {
+    /**
+     * 当前在勤人数报告
+     */
+    currentReportedAttendance?: null | CurrentReportedAttendance;
+    /**
+     * 店铺距离，单位 km
+     */
+    distance: number;
+    games: (Game & {
+      /**
+       * 机台综合在勤人数
+       */
+      totalAttendance?: number;
+    })[];
+    /**
+     * 店铺综合在勤人数
+     */
+    totalAttendance?: number;
+  })[];
+}
+
+/**
+ * 原点
+ */
+export interface ResponseLocation {
+  /**
+   * 原点纬度
+   */
+  latitude: number;
+  /**
+   * 原点经度
+   */
+  longitude: number;
+  /**
+   * 原点地名
+   */
+  name: string;
+}
+
+export interface CurrentReportedAttendance {
+  /**
+   * 上报说明
+   */
+  comment: null | string;
+  /**
+   * 上报时间
+   */
+  reportedAt: string;
+  /**
+   * 上报用户 ID
+   */
+  reportedBy: string;
+  /**
+   * 上报用户
+   */
+  reporter: User;
+}
+
+/**
+ * 店铺坐标
+ */
+export interface ShopLocation {
+  coordinates: number[];
+  type: string;
+}
+
 export interface AttendanceGame {
   /**
    * 游戏（版本）ID，BEMANICN 数据源等同于机台 ID
@@ -142,7 +221,7 @@ export interface User {
   /**
    * 用户类型
    */
-  userType: UserType;
+  userType?: UserType;
 }
 
 export interface ArcadeId {
@@ -326,4 +405,14 @@ export interface CustomAttendanceReport {
   reporterId: string;
   reporterName: string;
   reportedAt: string;
+}
+
+export interface DiscoverySettings {
+  _id: number;
+  channelId: string;
+  off: boolean;
+  radius: number;
+  operatorId: string;
+  operatorName: string;
+  updatedAt: string;
 }

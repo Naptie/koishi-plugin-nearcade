@@ -1,6 +1,7 @@
 import {
   AttendanceReportResponse,
   AttendanceResponse,
+  DiscoverResponse,
   ShopInfoResponse,
   ShopsListResponse
 } from './types';
@@ -35,6 +36,14 @@ export class Client {
       }
     }
     return response.json() as Promise<T>;
+  }
+
+  async discoverArcades(latitude: string, longitude: string, radius: number, name: string) {
+    return this.request<DiscoverResponse>(
+      `/discover?latitude=${latitude}&longitude=${longitude}&radius=${radius}${
+        name ? `&name=${encodeURIComponent(name)}` : ''
+      }`
+    );
   }
 
   async findArcades(query: string, limit: number = 0, max: number = 200) {

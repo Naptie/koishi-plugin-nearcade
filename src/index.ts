@@ -6,6 +6,7 @@ import {
   AttendanceResponse,
   CustomAttendanceReport,
   CustomShop,
+  DiscoverySettings,
   Shop
 } from './types';
 import zhCN from '../locales/zh-CN.yml';
@@ -15,6 +16,7 @@ declare module 'koishi' {
     arcades: Arcade;
     attendanceReports: AttendanceReport;
     customAttendanceReports: CustomAttendanceReport;
+    discoverySettings: DiscoverySettings;
   }
 }
 
@@ -135,6 +137,23 @@ export const apply = (ctx: Context) => {
       reporterId: 'string',
       reporterName: 'string',
       reportedAt: 'string'
+    },
+    {
+      primary: '_id',
+      autoInc: true
+    }
+  );
+
+  ctx.model.extend(
+    'discoverySettings',
+    {
+      _id: 'integer',
+      channelId: 'string',
+      off: 'boolean',
+      radius: 'integer',
+      operatorId: 'string',
+      operatorName: 'string',
+      updatedAt: 'string'
     },
     {
       primary: '_id',
@@ -295,7 +314,70 @@ export const apply = (ctx: Context) => {
     return message;
   };
 
+  const formatDistance = (distance: number) =>
+    distance >= 1 ? `(${distance.toFixed(2)} 千米)` : `(${(distance * 1000).toFixed(0)} 米)`;
+
   ctx.on('message', async (session) => {
+    if ('message' in session.event._data) {
+      const element = session.event._data.message[0];
+      if (
+        typeof element === 'object' &&
+        element.type === 'json' &&
+        'data' in element &&
+        typeof element.data.data === 'string'
+      ) {
+        const data = JSON.parse(element.data.data);
+        if (data.view === 'LocationShare' && 'Location.Search' in data.meta) {
+          const settings = (
+            await ctx.database.get('discoverySettings', { channelId: session.channelId })
+          )[0];
+          if (settings?.off) {
+            return;
+          }
+          const query = data.meta['Location.Search'];
+          const name = query.name;
+          const latitude = query.lat;
+          const longitude = query.lng;
+          if (latitude && longitude) {
+            const radius = settings?.radius || 10;
+            const result = await client.discoverArcades(latitude, longitude, radius, name);
+            if (typeof result === 'string') {
+              await session.send(`查询附近机厅失败：${result}`);
+              return;
+            }
+            const lines = [];
+            if (result.shops.length) {
+              lines.push(`${name ? `「${name}」` : ''}周围 ${radius} 千米内找到以下机厅：`);
+              for (const shop of result.shops) {
+                let reporter: string | null = null;
+                if (shop.currentReportedAttendance) {
+                  const reportedBySelf =
+                    shop.currentReportedAttendance.reportedBy === ctx.config.selfId;
+                  if (reportedBySelf) {
+                    const { reporterId, reporterName } = await getReport(shop.source, shop.id);
+                    reporter = `${reporterName} (${reporterId})`;
+                  } else {
+                    const user = shop.currentReportedAttendance.reporter;
+                    reporter = user.displayName || `@${user.name}`;
+                  }
+                }
+                lines.push(
+                  `-「${shop.name}」${formatDistance(shop.distance)} ${shop.totalAttendance} 人${reporter ? `（由 ${reporter} 上报于 ${new Date(shop.currentReportedAttendance.reportedAt).toLocaleTimeString()}）` : ''}`
+                );
+              }
+            } else {
+              lines.push(`${name ? `「${name}」` : ''}周围 ${radius} 千米内未找到机厅。`);
+            }
+            lines.push(
+              `有关更多信息，请访问 https://nearcade.phizone.cn/discover?latitude=${latitude}&longitude=${longitude}&radius=${radius}&name=${encodeURIComponent(name)}`
+            );
+            const message = lines.join('\n');
+            await session.send(result.shops.length > 5 ? toForwarded(message) : message);
+            return;
+          }
+        }
+      }
+    }
     if (session.content.trim().toLowerCase() === 'nearcade' && ctx.config.helpOnMention !== false) {
       await session.send(getHelpMessage());
       return;
@@ -526,6 +608,100 @@ export const apply = (ctx: Context) => {
   ctx.command('nearcade').action(() => {
     return getHelpMessage();
   });
+
+  ctx
+    .command('nearcade')
+    .subcommand('discover <option>')
+    .alias(
+      '附近机厅',
+      '探索附近',
+      '探索附近机厅',
+      '搜索附近',
+      '搜索附近机厅',
+      '发现附近',
+      '发现附近机厅',
+      '查询附近',
+      '查询附近机厅',
+      '查找附近',
+      '查找附近机厅'
+    )
+    .action(async ({ session }, optionStr) => {
+      const option = (optionStr || '').trim().toLowerCase();
+      let settings: Omit<DiscoverySettings, '_id'> = (
+        await ctx.database.get('discoverySettings', { channelId: session.channelId })
+      )[0];
+      if (!settings) {
+        settings = {
+          channelId: session.channelId,
+          off: false,
+          radius: 10,
+          operatorId: session.userId,
+          operatorName: session.username,
+          updatedAt: new Date().toISOString()
+        };
+        await ctx.database.create('discoverySettings', settings);
+      }
+      if (!option) {
+        return h(
+          'p',
+          `本群当前附近机厅探索功能处于${settings.off ? '关闭' : '开启'}状态，探索半径为 ${settings.radius} 千米。\n`,
+          `该项设置最后由 ${settings.operatorName} (${settings.operatorId}) 于 ${new Date(settings.updatedAt).toLocaleString()} 修改。\n`,
+          '发送“discover 关/off”关闭探索功能；\n',
+          '发送“discover 开/on”开启探索功能；\n',
+          '发送“discover <数字>”设置探索半径（范围 1~30 千米）。'
+        );
+      }
+      if (['关', '关掉', '关闭', 'off', 'close'].includes(option)) {
+        if (settings?.off) {
+          return '本群的附近机厅探索功能已是关闭状态。';
+        }
+        await ctx.database.set(
+          'discoverySettings',
+          { channelId: session.channelId },
+          {
+            off: true,
+            operatorId: session.userId,
+            operatorName: session.username,
+            updatedAt: new Date().toISOString()
+          }
+        );
+        return '已关闭本群的附近机厅探索功能。';
+      }
+      if (['开', '打开', '开启', 'on', 'open'].includes(option)) {
+        if (!settings?.off) {
+          return '本群的附近机厅探索功能已是开启状态。';
+        }
+        await ctx.database.set(
+          'discoverySettings',
+          { channelId: session.channelId },
+          {
+            off: false,
+            operatorId: session.userId,
+            operatorName: session.username,
+            updatedAt: new Date().toISOString()
+          }
+        );
+        return '已开启本群的附近机厅探索功能。';
+      }
+      const radius = parseFloat(option);
+      if (isNaN(radius) || radius < 1 || radius > 30 || radius.toString() !== option) {
+        return '半径参数无效，请输入 1~30 之间的数字。';
+      }
+      if (settings.radius === radius) {
+        return `本群的附近机厅探索半径已是 ${radius} 千米。`;
+      }
+      await ctx.database.set(
+        'discoverySettings',
+        { channelId: session.channelId },
+        {
+          radius,
+          operatorId: session.userId,
+          operatorName: session.username,
+          updatedAt: new Date().toISOString()
+        }
+      );
+      return `已将本群的附近机厅探索半径设置为 ${radius} 千米。`;
+    });
 
   ctx
     .command('nearcade')
