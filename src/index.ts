@@ -5,6 +5,7 @@ import {
   AttendanceReport,
   AttendanceResponse,
   CustomAttendanceReport,
+  CustomShop,
   Shop
 } from './types';
 import zhCN from '../locales/zh-CN.yml';
@@ -26,7 +27,7 @@ export interface Config {
   selfId: string;
   helpMessage?: string;
   helpOnMention?: boolean;
-  customShops?: { id: number; aliases: string[] }[];
+  customShops?: CustomShop[];
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -217,7 +218,7 @@ export const apply = (ctx: Context) => {
     countInput: number,
     operator: (typeof attendanceOperators)[number],
     gameId: number | undefined,
-    arcade: Shop | Config['customShops'][number],
+    arcade: Shop | CustomShop,
     session: Session
   ) => {
     let count = countInput;
@@ -305,9 +306,9 @@ export const apply = (ctx: Context) => {
         session.content.toLowerCase().endsWith(suffix)
       );
       const query = session.content.slice(0, -suffix!.length).trim().toLowerCase();
-      const customShop = ctx.config.customShops.find((shop: Config['customShops'][number]) =>
+      const customShop = ctx.config.customShops.find((shop: CustomShop) =>
         shop.aliases.some((alias) => alias.trim().toLowerCase() === query)
-      ) as Config['customShops'][number];
+      ) as CustomShop;
       let matched: {
         source: string;
         id: number;
@@ -331,7 +332,7 @@ export const apply = (ctx: Context) => {
           return;
         }
       }
-      const arcadeQuery: (((typeof matched)[number] | Config['customShops'][number]) & {
+      const arcadeQuery: (((typeof matched)[number] | CustomShop) & {
         data?: AttendanceResponse;
         customReporter?: {
           id: string;
@@ -421,7 +422,7 @@ export const apply = (ctx: Context) => {
       count: number;
       operator: (typeof attendanceOperators)[number];
       gameId?: number;
-      shop: Shop | Config['customShops'][number];
+      shop: Shop | CustomShop;
     }[] = [];
     for (const line of session.content.split('\n')) {
       for (const operator of attendanceOperators) {
@@ -431,9 +432,9 @@ export const apply = (ctx: Context) => {
         const [left, right] = line.split(operator).map((s) => s.trim());
         if (!left || !right) continue;
         const count = parseInt(right);
-        const customShop = ctx.config.customShops.find((shop: Config['customShops'][number]) =>
+        const customShop = ctx.config.customShops.find((shop: CustomShop) =>
           shop.aliases.some((alias) => alias.trim().toLowerCase() === left)
-        ) as Config['customShops'][number];
+        ) as CustomShop;
         if (
           isNaN(count) ||
           count < 0 ||

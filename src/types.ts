@@ -313,6 +313,11 @@ export interface AttendanceReport {
   reporterName: string;
 }
 
+export interface CustomShop {
+  id: number;
+  aliases: string[];
+}
+
 export interface CustomAttendanceReport {
   _id: number;
   shop: number;
