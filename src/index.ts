@@ -332,7 +332,7 @@ export const apply = (ctx: Context) => {
           return;
         }
       }
-      const regularQuery = matched.length > 0 ? matched : arcades;
+      const regularQuery = matched.length > 0 ? matched : customShop ? [] : arcades;
       const arcadeQuery: (((typeof matched)[number] | CustomShop) & {
         data?: AttendanceResponse;
         customReporter?: { id: string; name: string; time: string };
