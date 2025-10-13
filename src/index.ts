@@ -87,7 +87,7 @@ const attendanceOperators = ['=', '＝', '🟰', '+', '＋', '➕', '-', '－', 
 const isPlus = (op: string) => ['+', '＋', '➕'].includes(op);
 const isMinus = (op: string) => ['-', '－', '➖'].includes(op);
 
-const helpVersion = 2;
+const helpVersion = 3;
 
 export const apply = (ctx: Context) => {
   const client = new Client(ctx.config.apiBase, ctx.config.apiToken);
