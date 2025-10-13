@@ -666,7 +666,7 @@ export const apply = (ctx: Context) => {
   ctx
     .command('nearcade')
     .subcommand('info <name>')
-    .alias('机厅信息')
+    .alias('查询机厅', '机厅详情', '机厅信息', '机厅')
     .action(async ({ session }, ...segments) => {
       const arcades = await getArcadesByChannelId(session.channelId);
       const name = segments.join(' ').trim();
