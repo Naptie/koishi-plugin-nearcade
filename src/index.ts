@@ -332,14 +332,11 @@ export const apply = (ctx: Context) => {
           return;
         }
       }
+      const regularQuery = matched.length > 0 ? matched : arcades;
       const arcadeQuery: (((typeof matched)[number] | CustomShop) & {
         data?: AttendanceResponse;
-        customReporter?: {
-          id: string;
-          name: string;
-          time: string;
-        };
-      })[] = customShop ? [customShop] : matched.length > 0 ? matched : arcades;
+        customReporter?: { id: string; name: string; time: string };
+      })[] = customShop ? [customShop, ...regularQuery] : regularQuery;
       await Promise.all(
         arcadeQuery.map(async (arcade) => {
           if (!('source' in arcade && 'id' in arcade)) {
