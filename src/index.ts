@@ -448,6 +448,7 @@ export const apply = (ctx: Context) => {
             operator,
             shop: customShop
           });
+          break;
         }
         let success = false;
         for (const arcade of arcades) {
