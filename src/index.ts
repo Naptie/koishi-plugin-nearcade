@@ -721,6 +721,7 @@ export const apply = (ctx: Context) => {
           `查询到唯一机厅「${shop.name}」，请提供数个空格间隔的机厅别名，或发送句号以跳过别名设置。`
         );
         const reply = await session.prompt();
+        if (!reply) return '回复超时，操作已取消。';
         const aliases = ['。', '.'].includes(reply.trim()) ? [] : reply.trim().split(/\s+/);
         return bind(shop, aliases, session);
       } else {
