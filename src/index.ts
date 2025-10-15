@@ -395,7 +395,9 @@ export const apply = (ctx: Context) => {
         source: string;
         id: number;
         names: string[];
-      }[] = arcades.filter((item) => item.names.some((name) => query.startsWith(name)));
+      }[] = arcades.filter((item) =>
+        item.names.some((name) => name.trim().toLowerCase() === query)
+      );
       if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) {
         if (query.length < 2) {
           return;
