@@ -878,15 +878,13 @@ export const apply = (ctx: Context) => {
       return (
         `机厅「${shop.name}」：\n` +
         `- ID：${shop.source.toUpperCase()}/${shop.id}\n` +
-        ('names' in arcade
-          ? `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` +
-            `- 默认机台：${printGame(arcade.defaultGame)} (ID: ${arcade.defaultGame.gameId})\n`
-          : '') +
+        ('names' in arcade ? `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` : '') +
         `- 机台列表：\n` +
         shop.games
           .map(
             (game) =>
               `  - ${printGame(game)} (ID: ${game.gameId}) ×${game.quantity}` +
+              ('defaultGame' in arcade && arcade.defaultGame === game ? ' [默认]' : '') +
               ('gameAliases' in arcade
                 ? `\n    别名：${arcade.gameAliases.find((item) => item.gameId === game.gameId)?.aliases.join('，') || '无'}`
                 : '')
