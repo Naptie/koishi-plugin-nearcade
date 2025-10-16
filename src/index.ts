@@ -875,7 +875,7 @@ export const apply = (ctx: Context) => {
       } else {
         shop = arcade;
       }
-      return (
+      const message =
         `机厅「${shop.name}」：\n` +
         `- ID：${shop.source.toUpperCase()}/${shop.id}\n` +
         ('names' in arcade ? `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` : '') +
@@ -896,8 +896,8 @@ export const apply = (ctx: Context) => {
         ('registrantId' in arcade
           ? '\n' +
             `- 由 ${arcade.registrantName} (${arcade.registrantId}) 绑定于 ${new Date(arcade.registeredAt).toLocaleString()}`
-          : '')
-      );
+          : '');
+      return shop.games.length > 1 ? toForwarded(message) : message;
     });
 
   ctx
