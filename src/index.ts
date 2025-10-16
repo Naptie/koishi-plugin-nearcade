@@ -372,7 +372,7 @@ export const apply = (ctx: Context) => {
               `有关更多信息，请访问 https://nearcade.phizone.cn/discover?latitude=${latitude}&longitude=${longitude}&radius=${radius}&name=${encodeURIComponent(name)}`
             );
             const message = lines.join('\n');
-            await session.send(result.shops.length > 5 ? toForwarded(message) : message);
+            await session.send(result.shops.length > 3 ? toForwarded(message) : message);
             return;
           }
         }
