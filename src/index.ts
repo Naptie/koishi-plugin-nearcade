@@ -87,6 +87,21 @@ const attendanceOperators = ['=', '＝', '🟰', '+', '＋', '➕', '-', '－', 
 const isPlus = (op: string) => ['+', '＋', '➕'].includes(op);
 const isMinus = (op: string) => ['-', '－', '➖'].includes(op);
 
+const decodeHtmlEntities = (str: string) =>
+  str
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+
+const tryParseCqJson = (text: string) => {
+  const m = text.match(/\[CQ:json,data=(\{[\s\S]*?\})[\s]*\]/);
+  if (!m) return null;
+  const decoded = decodeHtmlEntities(m[1]);
+  return { type: 'json', data: { data: decoded } };
+};
+
 const helpVersion = 3;
 
 export const apply = (ctx: Context) => {
@@ -319,7 +334,20 @@ export const apply = (ctx: Context) => {
 
   ctx.on('message', async (session) => {
     if ('message' in session.event._data) {
-      const element = session.event._data.message[0];
+      const rawMessage = session.event._data.message;
+
+      let element: string | (typeof session.event._data.message)[number];
+      if (typeof rawMessage === 'string') {
+        element = tryParseCqJson(rawMessage) || { type: 'text', data: rawMessage };
+      } else if (Array.isArray(rawMessage)) {
+        element = rawMessage[0];
+        if (typeof element === 'string') {
+          element = tryParseCqJson(element) || { type: 'text', data: element };
+        }
+      } else {
+        element = rawMessage[0];
+      }
+
       if (
         typeof element === 'object' &&
         element.type === 'json' &&
