@@ -10,6 +10,7 @@ import {
   Shop
 } from './types';
 import zhCN from '../locales/zh-CN.yml';
+import { compressDiscoverUrl } from './utils';
 
 declare module 'koishi' {
   interface Tables {
@@ -24,6 +25,7 @@ export const name = 'nearcade';
 export const inject = ['database'];
 
 export interface Config {
+  urlBase: string;
   apiBase: string;
   apiToken: string;
   selfId: string;
@@ -33,6 +35,10 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
+  urlBase: Schema.string()
+    .default('https://nearcade.phizone.cn')
+    .description('nearcade 网站地址')
+    .role('url'),
   apiBase: Schema.string().required().description('nearcade API 地址').role('url'),
   apiToken: Schema.string().required().description('nearcade API 令牌').role('secret'),
   selfId: Schema.string().required().description('nearcade 用户 ID'),
@@ -106,6 +112,9 @@ const helpVersion = 3;
 
 export const apply = (ctx: Context) => {
   const client = new Client(ctx.config.apiBase, ctx.config.apiToken);
+  const urlBase = ctx.config.urlBase.endsWith('/')
+    ? ctx.config.urlBase.slice(0, -1)
+    : ctx.config.urlBase;
 
   ctx.model.extend(
     'arcades',
@@ -322,7 +331,7 @@ export const apply = (ctx: Context) => {
   const toForwarded = (text: string) => `<message forward>${text}</message>`;
 
   const getHelpMessage = () => {
-    let message = h('img', { src: `https://nearcade.phizone.cn/bot-help.png?v=${helpVersion}` });
+    let message = h('img', { src: `${urlBase}/bot-help.png?v=${helpVersion}` });
     if (ctx.config.helpMessage) {
       message = h('p', ctx.config.helpMessage, message);
     }
@@ -397,7 +406,7 @@ export const apply = (ctx: Context) => {
               lines.push(`${name ? `「${name}」` : ''}周围 ${radius} 千米内未找到机厅。`);
             }
             lines.push(
-              `有关更多信息，请访问 https://nearcade.phizone.cn/discover?latitude=${latitude}&longitude=${longitude}&radius=${radius}&name=${encodeURIComponent(name)}`
+              `有关更多信息，请访问 ${compressDiscoverUrl(latitude, longitude, radius, name, urlBase)}`
             );
             const message = lines.join('\n');
             await session.send(result.shops.length > 3 ? toForwarded(message) : message);
@@ -920,7 +929,7 @@ export const apply = (ctx: Context) => {
           .join('\n') +
         `\n` +
         `- 地址：${shop.source === 'ziv' ? `${shop.address.detailed} / ${shop.address.general.toReversed().join(', ')}` : `${shop.address.general.join('·')} / ${shop.address.detailed}`}\n` +
-        `- 更多信息：https://nearcade.phizone.cn/shops/${shop.source}/${shop.id}` +
+        `- 更多信息：${urlBase}/shops/${shop.source}/${shop.id}` +
         ('registrantId' in arcade
           ? '\n' +
             `- 由 ${arcade.registrantName} (${arcade.registrantId}) 绑定于 ${new Date(arcade.registeredAt).toLocaleString()}`
