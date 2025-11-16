@@ -436,7 +436,7 @@ export const apply = (ctx: Context) => {
         item.names.some((name) => name.trim().toLowerCase() === query)
       );
       if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) {
-        if (query.length < 2) {
+        if (query.replace(/[^\p{L}\p{N}_]/gu, '').length < 2) {
           return;
         }
         const result = await client.findArcades(query);
