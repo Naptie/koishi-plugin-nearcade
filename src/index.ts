@@ -318,10 +318,11 @@ export const apply = (ctx: Context) => {
       } else if (result.success) {
         const game = arcade.games.find((g) => g.gameId === gameId) || {
           name: '未知机台',
-          version: '未知版本'
+          version: '未知版本',
+          quantity: 1
         };
         await createReport(arcade.source, arcade.id, session.userId, session.username);
-        return `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人。`;
+        return `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人（均 ${(count / game.quantity).toFixed(1)}）。`;
       } else {
         return `上报机厅「${arcade.name}」在勤人数失败：未知错误`;
       }
@@ -526,7 +527,10 @@ export const apply = (ctx: Context) => {
                         reported.some((r) => r.gameId === game.gameId) ||
                         registered.some((r) => r.gameId === game.gameId)
                     )
-                    .map((game) => `  - ${printGame(game)}: ${game.total} 人`)
+                    .map(
+                      (game) =>
+                        `  - ${printGame(game)}: ${game.total} 人（均 ${(game.total / game.quantity).toFixed(1)}）`
+                    )
                 );
               }
               return lines.join('\n');

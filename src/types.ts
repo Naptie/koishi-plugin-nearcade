@@ -126,6 +126,10 @@ export interface AttendanceGame {
    */
   name: string;
   /**
+   * 机台数量
+   */
+  quantity: number;
+  /**
    * 游戏系列 ID
    */
   titleId: number;
