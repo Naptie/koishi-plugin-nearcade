@@ -788,7 +788,7 @@ export const apply = (ctx: Context) => {
       if (!option) {
         return h(
           'p',
-          `本群当前隐私模式处于${settings.private ? '开启' : '关闭'}状态。\n`,
+          `本群隐私模式当前处于${settings.private ? '开启' : '关闭'}状态。\n`,
           `该项设置最后由 ${settings.operatorName} (${settings.operatorId}) 于 ${new Date(settings.updatedAt).toLocaleString()} 修改。\n`,
           '发送“privacy 关/off”关闭隐私模式（上报时将显示群号）；\n',
           '发送“privacy 开/on”开启隐私模式（上报时将隐藏群号）。'
@@ -796,7 +796,7 @@ export const apply = (ctx: Context) => {
       }
       if (['关', '关掉', '关闭', 'off', 'close'].includes(option)) {
         if (!settings.private) {
-          return '本群的隐私模式已是关闭状态。';
+          return '本群已关闭隐私模式。';
         }
         await ctx.database.set(
           'groupSettings',
@@ -808,11 +808,11 @@ export const apply = (ctx: Context) => {
             updatedAt: new Date().toISOString()
           }
         );
-        return '已关闭本群的隐私模式。';
+        return '已为本群关闭隐私模式。';
       }
       if (['开', '打开', '开启', 'on', 'open'].includes(option)) {
         if (settings.private) {
-          return '本群的隐私模式已是开启状态。';
+          return '本群已开启隐私模式。';
         }
         await ctx.database.set(
           'groupSettings',
@@ -824,7 +824,7 @@ export const apply = (ctx: Context) => {
             updatedAt: new Date().toISOString()
           }
         );
-        return '已开启本群的隐私模式。';
+        return '已为本群开启隐私模式。';
       }
       return '无效的参数，请发送“privacy”查看帮助。';
     });
