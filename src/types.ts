@@ -420,3 +420,11 @@ export interface DiscoverySettings {
   operatorName: string;
   updatedAt: string;
 }
+
+export interface GroupSettings {
+  channelId: string;
+  private: boolean;
+  operatorId: string;
+  operatorName: string;
+  updatedAt: string;
+}

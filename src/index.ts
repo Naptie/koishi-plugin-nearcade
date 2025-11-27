@@ -7,6 +7,7 @@ import {
   CustomAttendanceReport,
   CustomShop,
   DiscoverySettings,
+  GroupSettings,
   Shop
 } from './types';
 import zhCN from '../locales/zh-CN.yml';
@@ -18,6 +19,7 @@ declare module 'koishi' {
     attendanceReports: AttendanceReport;
     customAttendanceReports: CustomAttendanceReport;
     discoverySettings: DiscoverySettings;
+    groupSettings: GroupSettings;
   }
 }
 
@@ -185,6 +187,20 @@ export const apply = (ctx: Context) => {
     }
   );
 
+  ctx.model.extend(
+    'groupSettings',
+    {
+      channelId: 'string',
+      private: 'boolean',
+      operatorId: 'string',
+      operatorName: 'string',
+      updatedAt: 'string'
+    },
+    {
+      primary: 'channelId'
+    }
+  );
+
   ctx.i18n.define('zh-CN', zhCN);
 
   const getArcadesByChannelId = (channelId: string) => {
@@ -303,15 +319,21 @@ export const apply = (ctx: Context) => {
       });
       return `成功上报机厅「${arcade.aliases[0]}」在勤人数为 ${count} 人。`;
     } else {
-      const group = session.event._data.group_name
-        ? `${session.event._data.group_name} (${session.channelId})`
-        : session.channelId;
+      const settings = (
+        await ctx.database.get('groupSettings', { channelId: session.channelId })
+      )[0];
+      const isPrivate = settings?.private;
+      const group = isPrivate
+        ? session.event._data.group_name || '私密群组'
+        : session.event._data.group_name
+          ? `${session.event._data.group_name} (${session.channelId})`
+          : session.channelId;
       const result = await client.reportAttendance(
         arcade.source,
         arcade.id,
         gameId,
         count,
-        `由 ${session.username} (${session.userId}) 从 QQ 群 ${group} 上报`
+        `由 ${session.username} (${session.userId}) 从 ${isPrivate && !session.event._data.group_name ? '' : 'QQ 群 '}${group} 上报`
       );
       if (typeof result === 'string') {
         return `上报机厅「${arcade.name}」在勤人数失败：${result}`;
@@ -744,6 +766,67 @@ export const apply = (ctx: Context) => {
         }
       );
       return `已将本群的附近机厅探索半径设置为 ${radius} 千米。`;
+    });
+
+  ctx
+    .command('nearcade')
+    .subcommand('privacy <option>')
+    .alias('隐私设置', '群组隐私')
+    .action(async ({ session }, optionStr) => {
+      const option = (optionStr || '').trim().toLowerCase();
+      let settings = (await ctx.database.get('groupSettings', { channelId: session.channelId }))[0];
+      if (!settings) {
+        settings = {
+          channelId: session.channelId,
+          private: false,
+          operatorId: session.userId,
+          operatorName: session.username,
+          updatedAt: new Date().toISOString()
+        };
+        await ctx.database.create('groupSettings', settings);
+      }
+      if (!option) {
+        return h(
+          'p',
+          `本群当前隐私模式处于${settings.private ? '开启' : '关闭'}状态。\n`,
+          `该项设置最后由 ${settings.operatorName} (${settings.operatorId}) 于 ${new Date(settings.updatedAt).toLocaleString()} 修改。\n`,
+          '发送“privacy 关/off”关闭隐私模式（上报时将显示群号）；\n',
+          '发送“privacy 开/on”开启隐私模式（上报时将隐藏群号）。'
+        );
+      }
+      if (['关', '关掉', '关闭', 'off', 'close'].includes(option)) {
+        if (!settings.private) {
+          return '本群的隐私模式已是关闭状态。';
+        }
+        await ctx.database.set(
+          'groupSettings',
+          { channelId: session.channelId },
+          {
+            private: false,
+            operatorId: session.userId,
+            operatorName: session.username,
+            updatedAt: new Date().toISOString()
+          }
+        );
+        return '已关闭本群的隐私模式。';
+      }
+      if (['开', '打开', '开启', 'on', 'open'].includes(option)) {
+        if (settings.private) {
+          return '本群的隐私模式已是开启状态。';
+        }
+        await ctx.database.set(
+          'groupSettings',
+          { channelId: session.channelId },
+          {
+            private: true,
+            operatorId: session.userId,
+            operatorName: session.username,
+            updatedAt: new Date().toISOString()
+          }
+        );
+        return '已开启本群的隐私模式。';
+      }
+      return '无效的参数，请发送“privacy”查看帮助。';
     });
 
   ctx
