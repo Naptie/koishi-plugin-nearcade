@@ -912,9 +912,13 @@ export const apply = (ctx: Context) => {
       const message =
         `查询到以下机厅（共 ${shops.length} 家）：\n` +
         shops
-          .map(
-            (item, index) => `${index + 1}. ${item.name} ${item.source.toUpperCase()}/${item.id}`
-          )
+          .map((item, index) => {
+            let identifier = `${item.source.toUpperCase()}/${item.id}`;
+            if (/^[a-zA-Z0-9]{2}$/.test(item.name.slice(-2))) {
+              identifier = `[${identifier}]`;
+            }
+            return `${index + 1}. ${item.name} ${identifier}`;
+          })
           .join('\n');
       const forward = shops.length > 5;
       return forward ? toForwarded(message) : message;
