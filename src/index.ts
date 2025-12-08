@@ -874,6 +874,28 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
+    .subcommand('search <query>')
+    .alias('查找机厅', '查询机厅', '搜索机厅', '搜寻机厅', '寻找机厅', 'query', 'find')
+    .action(async (_, ...segments) => {
+      const query = segments.join(' ');
+      if (query.trim().length === 0) {
+        return '查询字符串不得为空。';
+      }
+      const result = await client.findArcades(query);
+      if (typeof result === 'string') {
+        return `请求失败：${result}`;
+      }
+      const shops = result;
+      if (!shops.length) return '未查询到相关机厅';
+      const message =
+        `查询到以下机厅（共 ${shops.length} 家）：\n` +
+        shops.map((item, index) => `${index + 1}. ${item.name}`).join('\n');
+      const forward = shops.length > 5;
+      return forward ? toForwarded(message) : message;
+    });
+
+  ctx
+    .command('nearcade')
     .subcommand('list')
     .alias('机厅列表')
     .action(async ({ session }) => {
