@@ -110,7 +110,7 @@ const tryParseCqJson = (text: string) => {
   return { type: 'json', data: { data: decoded } };
 };
 
-const helpVersion = 4;
+const helpVersion = 5;
 
 export const apply = (ctx: Context) => {
   const client = new Client(ctx.config.apiBase, ctx.config.apiToken);
