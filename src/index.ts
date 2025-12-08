@@ -834,6 +834,9 @@ export const apply = (ctx: Context) => {
     .alias('绑定机厅', '添加机厅', 'add')
     .action(async ({ session }, ...segments) => {
       const query = segments.join(' ');
+      if (query.trim().length === 0) {
+        return '查询字符串不得为空。';
+      }
       const result = await client.findArcades(query);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
