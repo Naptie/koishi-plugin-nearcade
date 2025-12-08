@@ -508,7 +508,6 @@ export const apply = (ctx: Context) => {
           }
           const result = await client.getAttendance(arcade.source, arcade.id);
           if (typeof result === 'string') {
-            await session.send(`请求机厅「${arcade.names[0]}」在勤人数失败：${result}`);
             return;
           }
           arcade.data = result;
@@ -520,7 +519,7 @@ export const apply = (ctx: Context) => {
           await Promise.all(
             arcadeQuery.map(async (arcade) => {
               if (!arcade.data) {
-                return `-「${('names' in arcade ? arcade.names : arcade.aliases)[0]}」在勤人数获取失败`;
+                return `-「${('names' in arcade ? arcade.names : arcade.aliases)[0]}」获取失败`;
               }
               const { total, games, reported, registered } = arcade.data;
               if ('aliases' in arcade) {
