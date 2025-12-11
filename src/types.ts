@@ -424,6 +424,7 @@ export interface DiscoverySettings {
 export interface GroupSettings {
   channelId: string;
   private: boolean;
+  search: boolean;
   operatorId: string;
   operatorName: string;
   updatedAt: string;

@@ -192,6 +192,7 @@ export const apply = (ctx: Context) => {
     {
       channelId: 'string',
       private: 'boolean',
+      search: 'boolean',
       operatorId: 'string',
       operatorName: 'string',
       updatedAt: 'string'
@@ -567,6 +568,8 @@ export const apply = (ctx: Context) => {
       gameId?: number;
       shop: Shop | CustomShop;
     }[] = [];
+    const settings = (await ctx.database.get('groupSettings', { channelId: session.channelId }))[0];
+    const allowSearch = settings?.search !== false;
     for (const line of session.content.split('\n')) {
       let operator: (typeof attendanceOperators)[number] | undefined,
         left: string | undefined,
@@ -652,7 +655,7 @@ export const apply = (ctx: Context) => {
           break;
         }
       }
-      if (!success && doSearch) {
+      if (!success && doSearch && allowSearch) {
         const matched = await client.findArcades(left, 5);
         if (typeof matched === 'string') {
           await session.send(`查询机厅失败：${matched}`);
@@ -800,6 +803,7 @@ export const apply = (ctx: Context) => {
         settings = {
           channelId: session.channelId,
           private: false,
+          search: true,
           operatorId: session.userId,
           operatorName: session.username,
           updatedAt: new Date().toISOString()
@@ -848,6 +852,68 @@ export const apply = (ctx: Context) => {
         return '已为本群开启隐私模式。';
       }
       return '无效的参数，请发送“privacy”查看帮助。';
+    });
+
+  ctx
+    .command('nearcade')
+    .subcommand('autosearch <option>')
+    .alias('自动搜索', '搜索上报')
+    .action(async ({ session }, optionStr) => {
+      const option = (optionStr || '').trim().toLowerCase();
+      let settings = (await ctx.database.get('groupSettings', { channelId: session.channelId }))[0];
+      if (!settings) {
+        settings = {
+          channelId: session.channelId,
+          private: false,
+          search: true,
+          operatorId: session.userId,
+          operatorName: session.username,
+          updatedAt: new Date().toISOString()
+        };
+        await ctx.database.create('groupSettings', settings);
+      }
+      if (!option) {
+        return h(
+          'p',
+          `本群自动搜索功能当前处于${settings.search !== false ? '开启' : '关闭'}状态。\n`,
+          `该项设置最后由 ${settings.operatorName} (${settings.operatorId}) 于 ${new Date(settings.updatedAt).toLocaleString()} 修改。\n`,
+          '发送“autosearch 关/off”关闭自动搜索（仅允许上报已绑定机厅）；\n',
+          '发送“autosearch 开/on”开启自动搜索（允许上报未绑定机厅）。'
+        );
+      }
+      if (['关', '关掉', '关闭', 'off', 'close'].includes(option)) {
+        if (settings.search === false) {
+          return '本群已关闭自动搜索功能。';
+        }
+        await ctx.database.set(
+          'groupSettings',
+          { channelId: session.channelId },
+          {
+            search: false,
+            operatorId: session.userId,
+            operatorName: session.username,
+            updatedAt: new Date().toISOString()
+          }
+        );
+        return '已为本群关闭自动搜索功能。';
+      }
+      if (['开', '打开', '开启', 'on', 'open'].includes(option)) {
+        if (settings.search !== false) {
+          return '本群已开启自动搜索功能。';
+        }
+        await ctx.database.set(
+          'groupSettings',
+          { channelId: session.channelId },
+          {
+            search: true,
+            operatorId: session.userId,
+            operatorName: session.username,
+            updatedAt: new Date().toISOString()
+          }
+        );
+        return '已为本群开启自动搜索功能。';
+      }
+      return '无效的参数，请发送“autosearch”查看帮助。';
     });
 
   ctx
