@@ -514,18 +514,17 @@ export const apply = (ctx: Context) => {
           arcade.data = result;
         })
       );
-      const message =
-        '实时在勤情况：\n' +
-        (
+      if (arcadeQuery.length > 0) {
+        const message = (
           await Promise.all(
             arcadeQuery.map(async (arcade) => {
               if (!arcade.data) {
-                return `-「${('names' in arcade ? arcade.names : arcade.aliases)[0]}」获取失败`;
+                return `「${('names' in arcade ? arcade.names : arcade.aliases)[0]}」获取失败`;
               }
               const { total, games, reported, registered } = arcade.data;
               if ('aliases' in arcade) {
                 const reporter = arcade.customReporter;
-                return `-「${arcade.aliases[0]}」${total} 人${reporter ? `（由 ${reporter.name} (${reporter.id}) 上报于 ${new Date(reporter.time).toLocaleTimeString()}）` : ''}`;
+                return `「${arcade.aliases[0]}」${total} 人${reporter ? `（由 ${reporter.name} (${reporter.id}) 上报于 ${new Date(reporter.time).toLocaleTimeString()}）` : ''}`;
               }
               const report = reported[0];
               let reporter: string | null = null;
@@ -539,7 +538,7 @@ export const apply = (ctx: Context) => {
                 }
               }
               const lines = [
-                `-「${arcade.names[0]}」${total} 人${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
+                `「${arcade.names[0]}」${total} 人${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
               ];
               if (games.length) {
                 lines.push(
@@ -559,7 +558,8 @@ export const apply = (ctx: Context) => {
             })
           )
         ).join('\n');
-      await session.send(arcadeQuery.length > 5 ? toForwarded(message) : message);
+        await session.send(arcadeQuery.length > 5 ? toForwarded(message) : message);
+      }
       return;
     }
     const reportQueue: {
