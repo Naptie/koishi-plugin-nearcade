@@ -590,6 +590,9 @@ export const apply = (ctx: Context) => {
         left = l;
         right = r || '1';
       }
+      if (!left) {
+        continue;
+      }
       if (left.replace(/[^\p{L}\p{N}_]/gu, '').length < 2) {
         doSearch = false;
       }
@@ -612,14 +615,14 @@ export const apply = (ctx: Context) => {
         count > (customShop ? Infinity : 99) ||
         count.toString() !== right
       )
-        break;
+        continue;
       if (customShop) {
         reportQueue.push({
           count,
           operator,
           shop: customShop
         });
-        break;
+        continue;
       }
       let success = false;
       const arcades = await getArcadesByChannelId(session.channelId);
@@ -662,20 +665,20 @@ export const apply = (ctx: Context) => {
         const matched = await client.findArcades(left, 5);
         if (typeof matched === 'string') {
           await session.send(`查询机厅失败：${matched}`);
-          break;
+          continue;
         }
-        if (matched.length === 0) break;
+        if (matched.length === 0) continue;
         if (matched.length > 1) {
           await session.send(
             '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
               matched.map((item) => `- ${item.name}`).join('\n')
           );
-          break;
+          continue;
         }
         const defaultGame = getDefaultGame(matched[0]);
         if (!defaultGame) {
           await session.send(`机厅「${matched[0].name}」未收录任何机台，无法上报在勤人数。`);
-          break;
+          continue;
         }
         reportQueue.push({
           count,
