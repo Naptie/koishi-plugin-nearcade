@@ -590,6 +590,9 @@ export const apply = (ctx: Context) => {
         left = l;
         right = r || '1';
       }
+      if (left.replace(/[^\p{L}\p{N}_]/gu, '').length < 2) {
+        doSearch = false;
+      }
       if (!operator) {
         const m = line.trim().match(/^(.+?)(\d+)$/);
         if (!m || !m[1] || !m[2]) continue;
