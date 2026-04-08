@@ -90,10 +90,12 @@ const attendanceQuerySuffix = [
   '有多少人'
 ].sort((a, b) => b.length - a.length);
 
-const attendanceOperators = ['=', '＝', '🟰', '+', '＋', '➕', '-', '－', '➖'] as const;
+const plusOperators = ['+', '＋', '➕'] as const;
+const minusOperators = ['-', '－', '➖'] as const;
+const attendanceOperators = ['=', '＝', '🟰', ...plusOperators, ...minusOperators] as const;
 
-const isPlus = (op: string) => ['+', '＋', '➕'].includes(op);
-const isMinus = (op: string) => ['-', '－', '➖'].includes(op);
+const isPlus = (op: string) => plusOperators.includes(op as typeof plusOperators[number]);
+const isMinus = (op: string) => minusOperators.includes(op as typeof minusOperators[number]);
 
 const decodeHtmlEntities = (str: string) =>
   str
