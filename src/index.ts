@@ -2,16 +2,21 @@ import { Context, h, Schema, Session } from 'koishi';
 import { Client } from './client';
 import {
   Arcade,
+  ArcadeGameAlias,
   AttendanceReport,
   AttendanceResponse,
   CustomAttendanceReport,
   CustomShop,
   DiscoverySettings,
+  Game,
   GroupSettings,
   Shop
 } from './types';
 import zhCN from '../locales/zh-CN.yml';
 import { compressDiscoverUrl } from './utils';
+
+type LegacyArcadeRow = Arcade & { source?: string | null };
+type LegacyAttendanceReportRow = AttendanceReport & { source?: string | null };
 
 declare module 'koishi' {
   interface Tables {
@@ -38,7 +43,7 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   urlBase: Schema.string()
-    .default('https://nearcade.phizone.cn')
+    .default('https://nearcade.cn')
     .description('nearcade 网站地址')
     .role('url'),
   apiBase: Schema.string().required().description('nearcade API 地址').role('url'),
@@ -94,8 +99,8 @@ const plusOperators = ['+', '＋', '➕'] as const;
 const minusOperators = ['-', '－', '➖'] as const;
 const attendanceOperators = ['=', '＝', '🟰', ...plusOperators, ...minusOperators] as const;
 
-const isPlus = (op: string) => plusOperators.includes(op as typeof plusOperators[number]);
-const isMinus = (op: string) => minusOperators.includes(op as typeof minusOperators[number]);
+const isPlus = (op: string) => plusOperators.includes(op as (typeof plusOperators)[number]);
+const isMinus = (op: string) => minusOperators.includes(op as (typeof minusOperators)[number]);
 
 const decodeHtmlEntities = (str: string) =>
   str
@@ -112,6 +117,145 @@ const tryParseCqJson = (text: string) => {
   return { type: 'json', data: { data: decoded } };
 };
 
+const SHOP_ID_OFFSET_BEMANICN = 10000;
+const SHOP_ID_OFFSET_ZIV = 20000;
+const LEGACY_SHOP_SOURCES = ['bemanicn', 'ziv'] as const;
+
+type LegacyShopSource = (typeof LEGACY_SHOP_SOURCES)[number];
+
+const normalizeSource = (source?: string | null) => source?.toLowerCase().trim();
+
+const isLegacyShopSource = (source?: string | null): source is LegacyShopSource =>
+  LEGACY_SHOP_SOURCES.includes(normalizeSource(source) as LegacyShopSource);
+
+const isUnifiedShopIdForSource = (source: LegacyShopSource, id: number) => {
+  if (source === 'bemanicn') return id >= SHOP_ID_OFFSET_BEMANICN;
+  if (source === 'ziv') return id >= SHOP_ID_OFFSET_ZIV;
+  return true;
+};
+
+const isPreMigrationShopReference = (shop: { id: number; source?: string | null }) => {
+  const normalized = normalizeSource(shop.source);
+  return isLegacyShopSource(normalized) && !isUnifiedShopIdForSource(normalized, shop.id);
+};
+
+const toUnifiedShopId = (source: string | undefined, id: number) => {
+  const normalized = normalizeSource(source);
+  if (normalized && isLegacyShopSource(normalized)) {
+    return isPreMigrationShopReference({ source: normalized, id })
+      ? normalized === 'bemanicn'
+        ? SHOP_ID_OFFSET_BEMANICN + id
+        : SHOP_ID_OFFSET_ZIV + id
+      : id;
+  }
+  return id;
+};
+
+const dedupeText = (values: string[] = []) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of values) {
+    const value = raw?.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+};
+
+const getUnifiedShopId = (shop: { id: number; source?: string }) =>
+  toUnifiedShopId(shop.source, shop.id);
+
+const formatArcadeId = (shop: { id: number; source?: string }) => `${getUnifiedShopId(shop)}`;
+
+const isSameGameExact = (left: Partial<Game>, right: Game) =>
+  left.titleId === right.titleId &&
+  left.name === right.name &&
+  left.version === right.version &&
+  (left.comment ?? '') === right.comment &&
+  (left.quantity ?? 1) === right.quantity &&
+  (left.cost ?? '') === right.cost;
+
+const isSameGameIdentity = (left: Partial<Game>, right: Game) =>
+  left.titleId === right.titleId && left.name === right.name && left.version === right.version;
+
+const getLowestGame = (shop: Shop) => shop.games.toSorted((a, b) => a.gameId - b.gameId)[0];
+
+const getLowestGameByTitleId = (shop: Shop, titleId: number) =>
+  shop.games.filter((game) => game.titleId === titleId).toSorted((a, b) => a.gameId - b.gameId)[0];
+
+const resolveStoredGame = (stored: Partial<Game> | undefined, shop: Shop) => {
+  if (!stored) return undefined;
+  if (typeof stored.gameId === 'number') {
+    const matchedById = shop.games.find((game) => game.gameId === stored.gameId);
+    if (matchedById) return matchedById;
+  }
+  const matchedByExact = shop.games.find((game) => isSameGameExact(stored, game));
+  if (matchedByExact) return matchedByExact;
+  const matchedByIdentity = shop.games.find((game) => isSameGameIdentity(stored, game));
+  if (matchedByIdentity) return matchedByIdentity;
+  if (typeof stored.titleId === 'number') {
+    return getLowestGameByTitleId(shop, stored.titleId);
+  }
+};
+
+const inferTitleIdFromAliases = (aliases: string[] = []) => {
+  for (const alias of aliases) {
+    const normalized = alias.trim().toLowerCase();
+    const title = gameTitles.find((item) => item.names.includes(normalized));
+    if (title) return title.titleId;
+  }
+};
+
+const toArcadeGameAlias = (game: Game, aliases: string[]): ArcadeGameAlias => ({
+  gameId: game.gameId,
+  titleId: game.titleId,
+  name: game.name,
+  version: game.version,
+  comment: game.comment,
+  quantity: game.quantity,
+  cost: game.cost,
+  aliases: dedupeText(aliases)
+});
+
+const resolveAliasEntryGame = (entry: ArcadeGameAlias, shop: Shop) => {
+  const matched = resolveStoredGame(entry, shop);
+  if (matched) return matched;
+  const inferredTitleId = inferTitleIdFromAliases(entry.aliases);
+  if (typeof inferredTitleId === 'number') {
+    return getLowestGameByTitleId(shop, inferredTitleId);
+  }
+  if (shop.games.length === 1) {
+    return shop.games[0];
+  }
+};
+
+const mergeArcadeGameAliases = (entries: ArcadeGameAlias[] = [], shop?: Shop) => {
+  const merged = new Map<string, ArcadeGameAlias>();
+
+  for (const entry of entries) {
+    const aliases = dedupeText(entry.aliases);
+    if (!aliases.length) continue;
+
+    const resolved = shop ? resolveAliasEntryGame(entry, shop) : undefined;
+    const next = resolved ? toArcadeGameAlias(resolved, aliases) : { ...entry, aliases };
+    const key = resolved
+      ? `game:${resolved.gameId}`
+      : `legacy:${entry.gameId}:${entry.titleId ?? ''}:${entry.name ?? ''}:${entry.version ?? ''}`;
+    const previous = merged.get(key);
+
+    if (previous) {
+      previous.aliases = dedupeText([...previous.aliases, ...next.aliases]);
+    } else {
+      merged.set(key, next);
+    }
+  }
+
+  return [...merged.values()];
+};
+
 const helpVersion = 6;
 
 export const apply = (ctx: Context) => {
@@ -124,7 +268,6 @@ export const apply = (ctx: Context) => {
     'arcades',
     {
       _id: 'integer',
-      source: 'string',
       id: 'integer',
       names: 'array',
       defaultGame: 'json',
@@ -144,7 +287,6 @@ export const apply = (ctx: Context) => {
     'attendanceReports',
     {
       _id: 'integer',
-      source: 'string',
       id: 'integer',
       reporterId: 'string',
       reporterName: 'string'
@@ -206,21 +348,163 @@ export const apply = (ctx: Context) => {
 
   ctx.i18n.define('zh-CN', zhCN);
 
-  const getArcadesByChannelId = (channelId: string) => {
-    return ctx.database.get('arcades', { channelId });
+  const shopCache = new Map<number, Promise<Shop | undefined>>();
+
+  const getShopById = async (id: number) => {
+    if (!shopCache.has(id)) {
+      shopCache.set(
+        id,
+        (async () => {
+          const result = await client.getArcade(id);
+          if (typeof result === 'string') return undefined;
+          return result.shop;
+        })()
+      );
+    }
+    return shopCache.get(id)!;
   };
 
-  const getReport = async (source: string, id: number) => {
-    return (await ctx.database.get('attendanceReports', { source, id }))[0];
+  const hasSameJsonValue = (left: unknown, right: unknown) =>
+    JSON.stringify(left) === JSON.stringify(right);
+
+  const normalizeArcadeRecord = (arcade: LegacyArcadeRow, shop?: Shop): Arcade => {
+    const normalizedShopId = toUnifiedShopId(arcade.source ?? undefined, arcade.id);
+    const names = dedupeText(arcade.names);
+    const resolvedDefaultGame = shop
+      ? resolveStoredGame(arcade.defaultGame, shop) || getLowestGame(shop) || arcade.defaultGame
+      : arcade.defaultGame;
+    const resolvedAliases = shop
+      ? mergeArcadeGameAliases(arcade.gameAliases || [], shop)
+      : mergeArcadeGameAliases(arcade.gameAliases || []);
+
+    return {
+      ...arcade,
+      id: normalizedShopId,
+      names,
+      defaultGame: resolvedDefaultGame,
+      gameAliases: resolvedAliases
+    };
   };
 
-  const createReport = async (
-    source: string,
-    id: number,
-    reporterId: string,
-    reporterName: string
-  ) => {
-    const existing = await ctx.database.get('attendanceReports', { source, id });
+  const persistArcade = async (arcade: LegacyArcadeRow, shop?: Shop) => {
+    const normalized = normalizeArcadeRecord(arcade, shop);
+    const updates: Partial<Arcade> = {};
+
+    if (normalized.id !== arcade.id) updates.id = normalized.id;
+    if (!hasSameJsonValue(normalized.names, arcade.names)) updates.names = normalized.names;
+    if (!hasSameJsonValue(normalized.defaultGame, arcade.defaultGame)) {
+      updates.defaultGame = normalized.defaultGame;
+    }
+    if (!hasSameJsonValue(normalized.gameAliases, arcade.gameAliases)) {
+      updates.gameAliases = normalized.gameAliases;
+    }
+
+    if (Object.keys(updates).length) {
+      await ctx.database.set('arcades', { _id: arcade._id }, updates);
+    }
+
+    return normalized;
+  };
+
+  const ensureArcadeCurrent = async (arcade: LegacyArcadeRow, shop?: Shop) => {
+    const liveShop =
+      shop || (await getShopById(toUnifiedShopId(arcade.source ?? undefined, arcade.id)));
+    return persistArcade(arcade, liveShop);
+  };
+
+  const migrationPromise = (async () => {
+    const arcades = (await ctx.database.get('arcades', {})) as LegacyArcadeRow[];
+    const arcadeGroups = new Map<string, LegacyArcadeRow[]>();
+
+    for (const arcade of arcades) {
+      const unifiedId = toUnifiedShopId(arcade.source ?? undefined, arcade.id);
+      const key = `${arcade.channelId}:${unifiedId}`;
+      if (!arcadeGroups.has(key)) arcadeGroups.set(key, []);
+      arcadeGroups.get(key)!.push(arcade);
+    }
+
+    for (const group of arcadeGroups.values()) {
+      const primary = [...group].sort((a, b) => a._id - b._id)[0];
+      const unifiedId = toUnifiedShopId(primary.source ?? undefined, primary.id);
+      const shop = await getShopById(unifiedId);
+      const earliest = [...group].sort(
+        (a, b) => new Date(a.registeredAt).getTime() - new Date(b.registeredAt).getTime()
+      )[0];
+      const mergedAliases = mergeArcadeGameAliases(
+        group.flatMap((item) => item.gameAliases || []),
+        shop
+      );
+      const mergedNames = dedupeText(group.flatMap((item) => item.names));
+      const resolvedDefaultGame = shop
+        ? group.map((item) => resolveStoredGame(item.defaultGame, shop)).find((item) => !!item) ||
+          getLowestGame(shop) ||
+          primary.defaultGame
+        : primary.defaultGame;
+
+      await ctx.database.set(
+        'arcades',
+        { _id: primary._id },
+        {
+          id: unifiedId,
+          names: mergedNames,
+          defaultGame: resolvedDefaultGame,
+          gameAliases: mergedAliases,
+          registrantId: earliest.registrantId,
+          registrantName: earliest.registrantName,
+          registeredAt: earliest.registeredAt
+        }
+      );
+
+      for (const duplicate of group.filter((item) => item._id !== primary._id)) {
+        await ctx.database.remove('arcades', { _id: duplicate._id });
+      }
+    }
+
+    const reports = (await ctx.database.get(
+      'attendanceReports',
+      {}
+    )) as LegacyAttendanceReportRow[];
+    const reportGroups = new Map<number, LegacyAttendanceReportRow[]>();
+
+    for (const report of reports) {
+      const unifiedId = toUnifiedShopId(report.source ?? undefined, report.id);
+      if (!reportGroups.has(unifiedId)) reportGroups.set(unifiedId, []);
+      reportGroups.get(unifiedId)!.push(report);
+    }
+
+    for (const [id, group] of reportGroups) {
+      const primary = [...group].sort((a, b) => b._id - a._id)[0];
+      await ctx.database.set(
+        'attendanceReports',
+        { _id: primary._id },
+        {
+          id
+        }
+      );
+      for (const duplicate of group.filter((item) => item._id !== primary._id)) {
+        await ctx.database.remove('attendanceReports', { _id: duplicate._id });
+      }
+    }
+  })();
+
+  ctx.on('ready', () => void migrationPromise);
+
+  const ensureMigrated = () => migrationPromise;
+
+  const getArcadesByChannelId = async (channelId: string) => {
+    await ensureMigrated();
+    const arcades = (await ctx.database.get('arcades', { channelId })) as LegacyArcadeRow[];
+    return Promise.all(arcades.map((arcade) => ensureArcadeCurrent(arcade)));
+  };
+
+  const getReport = async (id: number) => {
+    await ensureMigrated();
+    return (await ctx.database.get('attendanceReports', { id }))[0];
+  };
+
+  const createReport = async (id: number, reporterId: string, reporterName: string) => {
+    await ensureMigrated();
+    const existing = await ctx.database.get('attendanceReports', { id });
     if (existing.length) {
       await ctx.database.set(
         'attendanceReports',
@@ -228,34 +512,43 @@ export const apply = (ctx: Context) => {
         { reporterId, reporterName }
       );
     } else {
-      await ctx.database.create('attendanceReports', { source, id, reporterId, reporterName });
+      await ctx.database.create('attendanceReports', {
+        id,
+        reporterId,
+        reporterName
+      });
     }
   };
 
   const printGame = ({ name, version }: { name: string; version: string }) =>
     version ? `${name} (${version})` : name;
 
+  const formatShopAddress = (shop: Shop) => {
+    const general = shop.address.general.filter(Boolean).join('·');
+    const detailed = shop.address.detailed?.trim();
+    return [general, detailed].filter(Boolean).join(' / ') || '未知';
+  };
+
   const printArcades = (arcades: Arcade[]) =>
     arcades
       .map(
         (item) =>
-          `- ${item.names[0]} ${item.source.toUpperCase()}/${item.id}` +
+          `- ${item.names[0]} ${formatArcadeId(item)}` +
           `\n  别名：${item.names.slice(1).join('，') || '无'}` +
           `\n  默认机台：${printGame(item.defaultGame)} (ID: ${item.defaultGame.gameId})` +
           `\n  由 ${item.registrantName} (${item.registrantId}) 绑定于 ${new Date(item.registeredAt).toLocaleString()}`
       )
       .join('\n');
 
-  const getDefaultGame = (shop: Shop) =>
-    shop.games.sort((a, b) =>
-      a.titleId === b.titleId ? a.gameId - b.gameId : a.titleId - b.titleId
-    )[0];
+  const getDefaultGame = (shop: Shop) => getLowestGame(shop);
 
   const bind = async (shop: Shop, aliases: string[] = [], session: Session) => {
+    await ensureMigrated();
+    const { channelId, userId, username } = getSessionContext(session);
+    const unifiedId = getUnifiedShopId(shop);
     const exists = await ctx.database.get('arcades', {
-      source: shop.source,
-      id: shop.id,
-      channelId: session.channelId
+      id: unifiedId,
+      channelId
     });
     if (exists.length > 0)
       return `该机厅已由 ${exists[0].registrantName} (${exists[0].registrantId}) 绑定于 ${new Date(exists[0].registeredAt).toLocaleString()}，无需重复绑定。`;
@@ -264,13 +557,13 @@ export const apply = (ctx: Context) => {
       return '该机厅未收录任何机台，无法绑定。';
     }
     await ctx.database.create('arcades', {
-      source: shop.source,
-      id: shop.id,
-      names: [shop.name, ...aliases],
+      id: unifiedId,
+      names: dedupeText([shop.name, ...aliases]),
       defaultGame,
-      channelId: session.channelId,
-      registrantId: session.userId,
-      registrantName: session.username,
+      gameAliases: [],
+      channelId,
+      registrantId: userId,
+      registrantName: username,
       registeredAt: new Date().toISOString()
     });
     return `机厅「${shop.name}」成功绑定至当前群聊。\n别名：${aliases.join('，') || '无'}\n默认机台：${printGame(defaultGame)}`;
@@ -283,19 +576,20 @@ export const apply = (ctx: Context) => {
     arcade: Shop | CustomShop,
     session: Session
   ) => {
+    const { channelId, userId, username } = getSessionContext(session);
     let count = countInput;
     if (isPlus(operator) || isMinus(operator)) {
       if ('aliases' in arcade) {
         const report = (
           await ctx.database.get('customAttendanceReports', {
             shop: arcade.id,
-            channelId: session.channelId
+            channelId
           })
         )[0];
         const existing = report?.count || 0;
         count = Math.max(0, isPlus(operator) ? existing + count : existing - count);
       } else {
-        const attendance = await client.getAttendance(arcade.source, arcade.id);
+        const attendance = await client.getAttendance(arcade.id);
         if (typeof attendance === 'string') {
           return `请求机厅「${arcade.name}」在勤人数失败：${attendance}`;
         }
@@ -310,33 +604,30 @@ export const apply = (ctx: Context) => {
     if ('aliases' in arcade) {
       await ctx.database.remove('customAttendanceReports', {
         shop: arcade.id,
-        channelId: session.channelId
+        channelId
       });
       await ctx.database.create('customAttendanceReports', {
         shop: arcade.id,
-        channelId: session.channelId,
+        channelId,
         count,
-        reporterId: session.userId,
-        reporterName: session.username,
+        reporterId: userId,
+        reporterName: username,
         reportedAt: new Date().toISOString()
       });
       return `成功上报机厅「${arcade.aliases[0]}」在勤人数为 ${count} 人。`;
     } else {
-      const settings = (
-        await ctx.database.get('groupSettings', { channelId: session.channelId })
-      )[0];
+      const settings = (await ctx.database.get('groupSettings', { channelId }))[0];
       const isPrivate = settings?.private;
       const group = isPrivate
         ? session.event._data.group_name || '私密群组'
         : session.event._data.group_name
-          ? `${session.event._data.group_name} (${session.channelId})`
-          : session.channelId;
+          ? `${session.event._data.group_name} (${channelId})`
+          : channelId;
       const result = await client.reportAttendance(
-        arcade.source,
         arcade.id,
-        gameId,
+        gameId!,
         count,
-        `由 ${session.username} (${session.userId}) 从 ${isPrivate && !session.event._data.group_name ? '' : 'QQ 群 '}${group} 上报`
+        `由 ${username} (${userId}) 从 ${isPrivate && !session.event._data.group_name ? '' : 'QQ 群 '}${group} 上报`
       );
       if (typeof result === 'string') {
         return `上报机厅「${arcade.name}」在勤人数失败：${result}`;
@@ -346,8 +637,8 @@ export const apply = (ctx: Context) => {
           version: '未知版本',
           quantity: 1
         };
-        await createReport(arcade.source, arcade.id, session.userId, session.username);
-        return `成功上报机厅「${arcade.name}」的机台「${printGame(game)}」在勤人数为 ${count} 人（均 ${(count / game.quantity).toFixed(1)}）。`;
+        await createReport(arcade.id, userId, username);
+        return `「${arcade.name}」\n- ${printGame(game)}：${count} 人（均 ${(count / game.quantity).toFixed(1)}）`;
       } else {
         return `上报机厅「${arcade.name}」在勤人数失败：未知错误`;
       }
@@ -367,7 +658,18 @@ export const apply = (ctx: Context) => {
   const formatDistance = (distance: number) =>
     distance >= 1 ? `(${distance.toFixed(2)} 千米)` : `(${(distance * 1000).toFixed(0)} 米)`;
 
+  const getSessionContext = (session?: Session) => ({
+    channelId: session?.channelId ?? `private:${session?.userId ?? 'unknown'}`,
+    userId: session?.userId ?? 'unknown',
+    username: session?.username ?? '未知用户',
+    content: session?.content ?? ''
+  });
+
   ctx.on('message', async (session) => {
+    const { channelId, content } = getSessionContext(session);
+    const trimmedContent = content.trim();
+    const lowerContent = trimmedContent.toLowerCase();
+
     if ('message' in session.event._data) {
       const rawMessage = session.event._data.message;
 
@@ -391,9 +693,7 @@ export const apply = (ctx: Context) => {
       ) {
         const data = JSON.parse(element.data.data);
         if (data.view === 'LocationShare' && 'Location.Search' in data.meta) {
-          const settings = (
-            await ctx.database.get('discoverySettings', { channelId: session.channelId })
-          )[0];
+          const settings = (await ctx.database.get('discoverySettings', { channelId }))[0];
           if (settings?.off) {
             return;
           }
@@ -413,19 +713,19 @@ export const apply = (ctx: Context) => {
               lines.push(`${name ? `「${name}」` : ''}周围 ${radius} 千米内找到以下机厅：`);
               for (const shop of result.shops) {
                 let reporter: string | null = null;
-                if (shop.currentReportedAttendance) {
-                  const reportedBySelf =
-                    shop.currentReportedAttendance.reportedBy === ctx.config.selfId;
+                const currentAttendance = shop.currentReportedAttendance;
+                if (currentAttendance) {
+                  const reportedBySelf = currentAttendance.reportedBy === ctx.config.selfId;
                   if (reportedBySelf) {
-                    const { reporterId, reporterName } = await getReport(shop.source, shop.id);
-                    reporter = `${reporterName} (${reporterId})`;
+                    const report = await getReport(shop.id);
+                    reporter = report ? `${report.reporterName} (${report.reporterId})` : null;
                   } else {
-                    const user = shop.currentReportedAttendance.reporter;
+                    const user = currentAttendance.reporter;
                     reporter = user.displayName || `@${user.name}`;
                   }
                 }
                 lines.push(
-                  `-「${shop.name}」${formatDistance(shop.distance)} ${shop.totalAttendance} 人${reporter ? `（由 ${reporter} 上报于 ${new Date(shop.currentReportedAttendance.reportedAt).toLocaleTimeString()}）` : ''}`
+                  `-「${shop.name}」${formatDistance(shop.distance)} ${shop.totalAttendance} 人${reporter && currentAttendance ? ` [${reporter} @ ${new Date(currentAttendance.reportedAt).toLocaleTimeString()}]` : ''}`
                 );
               }
             } else {
@@ -441,21 +741,18 @@ export const apply = (ctx: Context) => {
         }
       }
     }
-    if (session.content.trim().toLowerCase() === 'nearcade' && ctx.config.helpOnMention !== false) {
+    if (lowerContent === 'nearcade' && ctx.config.helpOnMention !== false) {
       await session.send(getHelpMessage());
       return;
     }
-    if (attendanceQuerySuffix.some((suffix) => session.content.toLowerCase().endsWith(suffix))) {
-      const arcades = await getArcadesByChannelId(session.channelId);
-      const suffix = attendanceQuerySuffix.find((suffix) =>
-        session.content.toLowerCase().endsWith(suffix)
-      );
-      const query = session.content.slice(0, -suffix!.length).trim().toLowerCase();
+    if (attendanceQuerySuffix.some((suffix) => lowerContent.endsWith(suffix))) {
+      const arcades = await getArcadesByChannelId(channelId);
+      const suffix = attendanceQuerySuffix.find((suffix) => lowerContent.endsWith(suffix));
+      const query = content.slice(0, -suffix!.length).trim().toLowerCase();
       const customShop = ctx.config.customShops.find((shop: CustomShop) =>
         shop.aliases.some((alias) => alias.trim().toLowerCase() === query)
       ) as CustomShop;
       let matched: {
-        source: string;
         id: number;
         names: string[];
       }[] = arcades.filter((item) =>
@@ -471,7 +768,6 @@ export const apply = (ctx: Context) => {
           return;
         }
         matched = result.map((shop) => ({
-          source: shop.source,
           id: shop.id,
           names: [shop.name]
         }));
@@ -486,11 +782,11 @@ export const apply = (ctx: Context) => {
       })[] = customShop ? [customShop, ...regularQuery] : regularQuery;
       await Promise.all(
         arcadeQuery.map(async (arcade) => {
-          if (!('source' in arcade && 'id' in arcade)) {
+          if ('aliases' in arcade) {
             const report = (
               await ctx.database.get('customAttendanceReports', {
                 shop: arcade.id,
-                channelId: session.channelId
+                channelId
               })
             )[0];
             arcade.data = {
@@ -509,7 +805,7 @@ export const apply = (ctx: Context) => {
               : undefined;
             return;
           }
-          const result = await client.getAttendance(arcade.source, arcade.id);
+          const result = await client.getAttendance(arcade.id);
           if (typeof result === 'string') {
             return;
           }
@@ -526,21 +822,23 @@ export const apply = (ctx: Context) => {
               const { total, games, reported, registered } = arcade.data;
               if ('aliases' in arcade) {
                 const reporter = arcade.customReporter;
-                return `「${arcade.aliases[0]}」${total} 人${reporter ? `（由 ${reporter.name} (${reporter.id}) 上报于 ${new Date(reporter.time).toLocaleTimeString()}）` : ''}`;
+                return `「${arcade.aliases[0]}」${total} 人${reporter ? ` [${reporter.name} (${reporter.id}) @ ${new Date(reporter.time).toLocaleTimeString()}]` : ''}`;
               }
               const report = reported[0];
               let reporter: string | null = null;
               if (report) {
                 const reportedBySelf = report.reportedBy === ctx.config.selfId;
                 if (reportedBySelf) {
-                  const { reporterId, reporterName } = await getReport(arcade.source, arcade.id);
-                  reporter = `${reporterName} (${reporterId})`;
+                  const savedReport = await getReport(arcade.id);
+                  reporter = savedReport
+                    ? `${savedReport.reporterName} (${savedReport.reporterId})`
+                    : null;
                 } else {
                   reporter = report.reporter.displayName || `@${report.reporter.name}`;
                 }
               }
               const lines = [
-                `「${arcade.names[0]}」${total} 人${reporter ? `（由 ${reporter} 上报于 ${new Date(report.reportedAt).toLocaleTimeString()}）` : ''}`
+                `「${arcade.names[0]}」${total} 人${reporter ? ` [${reporter} @ ${new Date(report.reportedAt).toLocaleTimeString()}]` : ''}`
               ];
               if (games.length) {
                 lines.push(
@@ -570,9 +868,9 @@ export const apply = (ctx: Context) => {
       gameId?: number;
       shop: Shop | CustomShop;
     }[] = [];
-    const settings = (await ctx.database.get('groupSettings', { channelId: session.channelId }))[0];
+    const settings = (await ctx.database.get('groupSettings', { channelId }))[0];
     const allowSearch = settings?.search !== false;
-    for (const line of session.content.split('\n')) {
+    for (const line of content.split('\n')) {
       let operator: (typeof attendanceOperators)[number] | undefined,
         left: string | undefined,
         right: string | undefined,
@@ -607,7 +905,8 @@ export const apply = (ctx: Context) => {
         right = r;
         doSearch = false;
       }
-      const count = parseInt(right);
+      if (!right) continue;
+      const count = parseInt(right, 10);
       const customShop = ctx.config.customShops.find((shop: CustomShop) =>
         shop.aliases.some((alias) => alias.trim().toLowerCase() === left)
       ) as CustomShop;
@@ -627,26 +926,31 @@ export const apply = (ctx: Context) => {
         continue;
       }
       let success = false;
-      const arcades = await getArcadesByChannelId(session.channelId);
+      const arcades = await getArcadesByChannelId(channelId);
       for (const arcade of arcades) {
         let gameId = arcade.defaultGame.gameId;
-        success = arcade.names.includes(left);
-        const arcadeData = await client.getArcade(arcade.source, arcade.id);
+        const arcadeData = await client.getArcade(arcade.id);
         if (typeof arcadeData === 'string') continue;
+        const currentArcade = await ensureArcadeCurrent(arcade, arcadeData.shop);
+        success = currentArcade.names.includes(left);
         if (!success) {
           for (let i = 1; i < left.length; i++) {
             const arcadeName = left.slice(0, i).toLowerCase().trim();
-            if (!arcade.names.includes(arcadeName)) continue;
+            if (!currentArcade.names.includes(arcadeName)) continue;
             const gameName = left.slice(i).toLowerCase().trim();
-            gameId = arcade.gameAliases.find((g) => g.aliases.includes(gameName))?.gameId;
-            if (gameId) {
+            const aliasedGameId = currentArcade.gameAliases.find((g) =>
+              g.aliases.includes(gameName)
+            )?.gameId;
+            if (aliasedGameId !== undefined) {
+              gameId = aliasedGameId;
               success = true;
               break;
             } else {
-              gameId = arcadeData.shop.games.find(
+              const titleMatchedGameId = arcadeData.shop.games.find(
                 (g) => g.titleId === gameTitles.find((g) => g.names.includes(gameName))?.titleId
               )?.gameId;
-              if (gameId) {
+              if (titleMatchedGameId !== undefined) {
+                gameId = titleMatchedGameId;
                 success = true;
                 break;
               }
@@ -723,17 +1027,19 @@ export const apply = (ctx: Context) => {
       '查找附近机厅'
     )
     .action(async ({ session }, optionStr) => {
+      if (!session) return '会话不可用。';
       const option = (optionStr || '').trim().toLowerCase();
+      const { channelId, userId, username } = getSessionContext(session);
       let settings: Omit<DiscoverySettings, '_id'> = (
-        await ctx.database.get('discoverySettings', { channelId: session.channelId })
+        await ctx.database.get('discoverySettings', { channelId })
       )[0];
       if (!settings) {
         settings = {
-          channelId: session.channelId,
+          channelId,
           off: false,
           radius: 10,
-          operatorId: session.userId,
-          operatorName: session.username,
+          operatorId: userId,
+          operatorName: username,
           updatedAt: new Date().toISOString()
         };
         await ctx.database.create('discoverySettings', settings);
@@ -754,11 +1060,11 @@ export const apply = (ctx: Context) => {
         }
         await ctx.database.set(
           'discoverySettings',
-          { channelId: session.channelId },
+          { channelId },
           {
             off: true,
-            operatorId: session.userId,
-            operatorName: session.username,
+            operatorId: userId,
+            operatorName: username,
             updatedAt: new Date().toISOString()
           }
         );
@@ -770,11 +1076,11 @@ export const apply = (ctx: Context) => {
         }
         await ctx.database.set(
           'discoverySettings',
-          { channelId: session.channelId },
+          { channelId },
           {
             off: false,
-            operatorId: session.userId,
-            operatorName: session.username,
+            operatorId: userId,
+            operatorName: username,
             updatedAt: new Date().toISOString()
           }
         );
@@ -789,11 +1095,11 @@ export const apply = (ctx: Context) => {
       }
       await ctx.database.set(
         'discoverySettings',
-        { channelId: session.channelId },
+        { channelId },
         {
           radius,
-          operatorId: session.userId,
-          operatorName: session.username,
+          operatorId: userId,
+          operatorName: username,
           updatedAt: new Date().toISOString()
         }
       );
@@ -805,15 +1111,17 @@ export const apply = (ctx: Context) => {
     .subcommand('privacy <option>')
     .alias('隐私设置', '群组隐私')
     .action(async ({ session }, optionStr) => {
+      if (!session) return '会话不可用。';
       const option = (optionStr || '').trim().toLowerCase();
-      let settings = (await ctx.database.get('groupSettings', { channelId: session.channelId }))[0];
+      const { channelId, userId, username } = getSessionContext(session);
+      let settings = (await ctx.database.get('groupSettings', { channelId }))[0];
       if (!settings) {
         settings = {
-          channelId: session.channelId,
+          channelId,
           private: false,
           search: true,
-          operatorId: session.userId,
-          operatorName: session.username,
+          operatorId: userId,
+          operatorName: username,
           updatedAt: new Date().toISOString()
         };
         await ctx.database.create('groupSettings', settings);
@@ -833,11 +1141,11 @@ export const apply = (ctx: Context) => {
         }
         await ctx.database.set(
           'groupSettings',
-          { channelId: session.channelId },
+          { channelId },
           {
             private: false,
-            operatorId: session.userId,
-            operatorName: session.username,
+            operatorId: userId,
+            operatorName: username,
             updatedAt: new Date().toISOString()
           }
         );
@@ -849,11 +1157,11 @@ export const apply = (ctx: Context) => {
         }
         await ctx.database.set(
           'groupSettings',
-          { channelId: session.channelId },
+          { channelId },
           {
             private: true,
-            operatorId: session.userId,
-            operatorName: session.username,
+            operatorId: userId,
+            operatorName: username,
             updatedAt: new Date().toISOString()
           }
         );
@@ -867,15 +1175,17 @@ export const apply = (ctx: Context) => {
     .subcommand('autosearch <option>')
     .alias('自动搜索', '搜索上报')
     .action(async ({ session }, optionStr) => {
+      if (!session) return '会话不可用。';
       const option = (optionStr || '').trim().toLowerCase();
-      let settings = (await ctx.database.get('groupSettings', { channelId: session.channelId }))[0];
+      const { channelId, userId, username } = getSessionContext(session);
+      let settings = (await ctx.database.get('groupSettings', { channelId }))[0];
       if (!settings) {
         settings = {
-          channelId: session.channelId,
+          channelId,
           private: false,
           search: true,
-          operatorId: session.userId,
-          operatorName: session.username,
+          operatorId: userId,
+          operatorName: username,
           updatedAt: new Date().toISOString()
         };
         await ctx.database.create('groupSettings', settings);
@@ -895,11 +1205,11 @@ export const apply = (ctx: Context) => {
         }
         await ctx.database.set(
           'groupSettings',
-          { channelId: session.channelId },
+          { channelId },
           {
             search: false,
-            operatorId: session.userId,
-            operatorName: session.username,
+            operatorId: userId,
+            operatorName: username,
             updatedAt: new Date().toISOString()
           }
         );
@@ -911,11 +1221,11 @@ export const apply = (ctx: Context) => {
         }
         await ctx.database.set(
           'groupSettings',
-          { channelId: session.channelId },
+          { channelId },
           {
             search: true,
-            operatorId: session.userId,
-            operatorName: session.username,
+            operatorId: userId,
+            operatorName: username,
             updatedAt: new Date().toISOString()
           }
         );
@@ -929,6 +1239,7 @@ export const apply = (ctx: Context) => {
     .subcommand('bind <query>')
     .alias('绑定机厅', '添加机厅', 'add')
     .action(async ({ session }, ...segments) => {
+      if (!session) return '会话不可用。';
       const query = segments.join(' ');
       if (query.trim().length === 0) {
         return '查询字符串不得为空。';
@@ -987,7 +1298,7 @@ export const apply = (ctx: Context) => {
         `查询到以下机厅（共 ${shops.length} 家）：\n` +
         shops
           .map((item, index) => {
-            let identifier = `${item.source.toUpperCase()}/${item.id}`;
+            let identifier = formatArcadeId(item);
             if (/^[a-zA-Z0-9]{2}$/.test(item.name.slice(-2))) {
               identifier = `[${identifier}]`;
             }
@@ -1003,7 +1314,9 @@ export const apply = (ctx: Context) => {
     .subcommand('list')
     .alias('机厅列表')
     .action(async ({ session }) => {
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       return '本群聊已绑定以下机厅：\n' + printArcades(arcades);
     });
@@ -1013,7 +1326,9 @@ export const apply = (ctx: Context) => {
     .subcommand('unbind <name>')
     .alias('解绑机厅', '删除机厅', 'remove')
     .action(async ({ session }, ...segments) => {
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       const name = segments.join(' ').trim();
       const matched = match(name, arcades);
@@ -1027,11 +1342,12 @@ export const apply = (ctx: Context) => {
     });
 
   const match = (name: string, arcades: Arcade[]) => {
+    const normalizedName = name.trim();
     return arcades.filter((item) => {
-      if (item.names.includes(name)) return true;
-      const parts = name.split('/');
-      if (parts.length !== 2) return false;
-      return item.source === parts[0].toLowerCase() && item.id === parseInt(parts[1]);
+      if (item.names.includes(normalizedName)) return true;
+      if (normalizedName === formatArcadeId(item)) return true;
+      const numeric = parseInt(normalizedName, 10);
+      return !isNaN(numeric) && item.id === numeric;
     });
   };
 
@@ -1051,7 +1367,9 @@ export const apply = (ctx: Context) => {
     .alias('添加别名', '添加机厅别名')
     .action(async ({ session }, name, ...aliases) => {
       if (!aliases.length) return '请至少提供一个别名。';
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       const matched = matchWithAliases(name, aliases, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
@@ -1074,7 +1392,9 @@ export const apply = (ctx: Context) => {
     .alias('删除别名', '删除机厅别名')
     .action(async ({ session }, name, ...aliases) => {
       if (!aliases.length) return '请至少提供一个别名。';
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       const matched = matchWithAliases(name, aliases, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
@@ -1096,7 +1416,9 @@ export const apply = (ctx: Context) => {
     .subcommand('info <name>')
     .alias('查询机厅', '机厅详情', '机厅信息', '机厅')
     .action(async ({ session }, ...segments) => {
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       const name = segments.join(' ').trim();
       let matched: Arcade[] | Shop[] = match(name, arcades);
       if (matched.length > 1) {
@@ -1119,7 +1441,7 @@ export const apply = (ctx: Context) => {
       const arcade = matched[0];
       let shop: Shop;
       if ('names' in arcade) {
-        const result = await client.getArcade(arcade.source, arcade.id);
+        const result = await client.getArcade(arcade.id);
         if (typeof result === 'string') {
           return `请求失败：${result}`;
         }
@@ -1127,27 +1449,28 @@ export const apply = (ctx: Context) => {
       } else {
         shop = arcade;
       }
+      const savedArcade = 'names' in arcade ? await ensureArcadeCurrent(arcade, shop) : undefined;
       const message =
         `机厅「${shop.name}」：\n` +
-        `- ID：${shop.source.toUpperCase()}/${shop.id}\n` +
-        ('names' in arcade ? `- 别名：${arcade.names.slice(1).join('，') || '无'}\n` : '') +
+        `- ID：${formatArcadeId(shop)}\n` +
+        (savedArcade ? `- 别名：${savedArcade.names.slice(1).join('，') || '无'}\n` : '') +
         `- 机台列表：\n` +
         shop.games
           .map(
             (game) =>
               `  - ${printGame(game)} (ID: ${game.gameId}) ×${game.quantity}` +
-              ('defaultGame' in arcade && arcade.defaultGame === game ? ' [默认]' : '') +
-              ('gameAliases' in arcade
-                ? `\n    别名：${arcade.gameAliases.find((item) => item.gameId === game.gameId)?.aliases.join('，') || '无'}`
+              (savedArcade && savedArcade.defaultGame.gameId === game.gameId ? ' [默认]' : '') +
+              (savedArcade
+                ? `\n    别名：${savedArcade.gameAliases.find((item) => item.gameId === game.gameId)?.aliases?.join('，') || '无'}`
                 : '')
           )
           .join('\n') +
         `\n` +
-        `- 地址：${shop.source === 'ziv' ? `${shop.address.detailed} / ${shop.address.general.toReversed().join(', ')}` : `${shop.address.general.join('·')} / ${shop.address.detailed}`}\n` +
-        `- 更多信息：${urlBase}/shops/${shop.source}/${shop.id}` +
-        ('registrantId' in arcade
+        `- 地址：${formatShopAddress(shop)}\n` +
+        `- 更多信息：${urlBase}/shops/${shop.id}` +
+        (savedArcade
           ? '\n' +
-            `- 由 ${arcade.registrantName} (${arcade.registrantId}) 绑定于 ${new Date(arcade.registeredAt).toLocaleString()}`
+            `- 由 ${savedArcade.registrantName} (${savedArcade.registrantId}) 绑定于 ${new Date(savedArcade.registeredAt).toLocaleString()}`
           : '');
       return shop.games.length > 1 ? toForwarded(message) : message;
     });
@@ -1159,7 +1482,9 @@ export const apply = (ctx: Context) => {
     .action(async ({ session }, name, gameIdStr) => {
       const gameId = parseInt(gameIdStr);
       if (isNaN(gameId)) return '无效的机台 ID。';
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       const matched = match(name, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
@@ -1167,13 +1492,14 @@ export const apply = (ctx: Context) => {
         return '找到多个匹配的机厅，请使用更具体的名称或别名：\n' + printArcades(matched);
       }
       const arcade = matched[0];
-      const result = await client.getArcade(arcade.source, arcade.id);
+      const result = await client.getArcade(arcade.id);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
       }
       const { shop } = result;
       const game = shop.games.find((item) => item.gameId === gameId);
       if (!game) return '未找到对应的机台，请检查机台 ID 是否正确。';
+      await ensureArcadeCurrent(arcade, shop);
       await ctx.database.set('arcades', { _id: arcade._id }, { defaultGame: game });
       return `机厅「${arcade.names[0]}」的默认机台已成功设置为「${printGame(game)}」。`;
     });
@@ -1186,7 +1512,9 @@ export const apply = (ctx: Context) => {
       if (!aliases.length) return '请至少提供一个别名。';
       const gameId = parseInt(gameIdStr);
       if (isNaN(gameId)) return '无效的机台 ID。';
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
       const matched = match(name, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
@@ -1194,20 +1522,26 @@ export const apply = (ctx: Context) => {
         return '找到多个匹配的机厅，请使用更具体的名称或别名：\n' + printArcades(matched);
       }
       const arcade = matched[0];
-      const result = await client.getArcade(arcade.source, arcade.id);
+      const result = await client.getArcade(arcade.id);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
       }
       const { shop } = result;
       const game = shop.games.find((item) => item.gameId === gameId);
       if (!game) return '未找到对应的机台，请检查机台 ID 是否正确。';
+      const normalizedArcade = await ensureArcadeCurrent(arcade, shop);
       const newAliases = aliases.filter(
         (alias) =>
-          !arcade.gameAliases.some((item) => item.gameId === gameId && item.aliases.includes(alias))
+          !normalizedArcade.gameAliases.some(
+            (item) => item.gameId === gameId && item.aliases.includes(alias)
+          )
       );
       if (!newAliases.length) return '提供的别名均已存在或与其他机台冲突。';
-      arcade.gameAliases.push({ gameId, aliases: newAliases });
-      await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases: arcade.gameAliases });
+      const gameAliases = mergeArcadeGameAliases(
+        [...normalizedArcade.gameAliases, toArcadeGameAlias(game, newAliases)],
+        shop
+      );
+      await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases });
       return `机台「${printGame(game)}」已成功添加别名：${newAliases.join('，')}。`;
     });
 
@@ -1219,35 +1553,31 @@ export const apply = (ctx: Context) => {
       if (!aliases.length) return '请至少提供一个别名。';
       const gameId = parseInt(gameIdStr);
       if (isNaN(gameId)) return '无效的机台 ID。';
-      const arcades = await getArcadesByChannelId(session.channelId);
+      if (!session) return '会话不可用。';
+      const { channelId } = getSessionContext(session);
+      const arcades = await getArcadesByChannelId(channelId);
       if (!arcades.length) return '本群聊尚未绑定任何机厅。';
-      const matched = arcades.filter((item) => {
-        if (item.names.includes(name)) return true;
-        const parts = name.split('/');
-        if (parts.length !== 2) return false;
-        return item.source === parts[0].toLowerCase() && item.id === parseInt(parts[1]);
-      });
+      const matched = match(name, arcades);
       if (!matched.length) return '未找到匹配的机厅，请检查名称或别名是否正确。';
       if (matched.length > 1) {
         return '找到多个匹配的机厅，请使用更具体的名称或别名：\n' + printArcades(matched);
       }
       const arcade = matched[0];
-      const result = await client.getArcade(arcade.source, arcade.id);
+      const result = await client.getArcade(arcade.id);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
       }
       const { shop } = result;
       const game = shop.games.find((item) => item.gameId === gameId);
       if (!game) return '未找到对应的机台，请检查机台 ID 是否正确。';
-      const aliasEntry = arcade.gameAliases.find((item) => item.gameId === gameId);
+      const normalizedArcade = await ensureArcadeCurrent(arcade, shop);
+      const aliasEntry = normalizedArcade.gameAliases.find((item) => item.gameId === gameId);
       if (!aliasEntry) return '该机台尚未添加任何别名，无法删除。';
       const existingAliases = aliases.filter((alias) => aliasEntry.aliases.includes(alias));
       if (!existingAliases.length) return '提供的别名均不存在，无法删除。';
       aliasEntry.aliases = aliasEntry.aliases.filter((alias) => !existingAliases.includes(alias));
-      if (!aliasEntry.aliases.length) {
-        arcade.gameAliases = arcade.gameAliases.filter((item) => item.gameId !== gameId);
-      }
-      await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases: arcade.gameAliases });
+      const gameAliases = normalizedArcade.gameAliases.filter((item) => item.aliases.length > 0);
+      await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases });
       return `机台「${printGame(game)}」已成功删除别名：${existingAliases.join('，')}。`;
     });
 };

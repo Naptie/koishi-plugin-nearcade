@@ -230,7 +230,6 @@ export interface User {
 
 export interface ArcadeId {
   id: number;
-  source: string;
 }
 
 /**
@@ -239,6 +238,7 @@ export interface ArcadeId {
 export enum UserType {
   ClubAdmin = 'club_admin',
   ClubModerator = 'club_moderator',
+  Developer = 'developer',
   Regular = 'regular',
   SchoolAdmin = 'school_admin',
   SchoolModerator = 'school_moderator',
@@ -294,7 +294,7 @@ export interface Shop {
    */
   games: Game[];
   /**
-   * 店铺 ID，须与 source 结合才能唯一确定店铺
+   * 店铺 ID
    */
   id: number;
   /**
@@ -309,10 +309,6 @@ export interface Shop {
    * 营业时间，仅有 1 个元素时表示整周均为该营业时间；有 7 个元素时每个元素分别代表一周中一天的营业时间
    */
   openingHours: Array<number[]>;
-  /**
-   * 店铺来源，目前可能为 bemanicn、ziv
-   */
-  source: string;
   /**
    * 更新时间
    */
@@ -364,6 +360,17 @@ export interface Game {
   version: string;
 }
 
+export interface ArcadeGameAlias {
+  aliases: string[];
+  gameId: number;
+  titleId?: number;
+  name?: string;
+  version?: string;
+  comment?: string;
+  quantity?: number;
+  cost?: string;
+}
+
 /**
  * 店铺坐标
  */
@@ -374,14 +381,10 @@ export interface Location {
 
 export interface Arcade {
   _id: number;
-  source: string;
   id: number;
   names: string[];
   defaultGame: Game;
-  gameAliases: {
-    gameId: number;
-    aliases: string[];
-  }[];
+  gameAliases: ArcadeGameAlias[];
   channelId: string;
   registrantId: string;
   registrantName: string;
@@ -390,7 +393,6 @@ export interface Arcade {
 
 export interface AttendanceReport {
   _id: number;
-  source: string;
   id: number;
   reporterId: string;
   reporterName: string;

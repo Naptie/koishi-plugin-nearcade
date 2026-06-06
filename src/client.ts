@@ -63,22 +63,16 @@ export class Client {
     return results;
   }
 
-  async getArcade(source: string, id: number) {
-    return this.request<ShopInfoResponse>(`/shops/${source}/${id}`);
+  async getArcade(id: number) {
+    return this.request<ShopInfoResponse>(`/shops/${id}`);
   }
 
-  async getAttendance(source: string, id: number) {
-    return this.request<AttendanceResponse>(`/shops/${source}/${id}/attendance`);
+  async getAttendance(id: number) {
+    return this.request<AttendanceResponse>(`/shops/${id}/attendance`);
   }
 
-  async reportAttendance(
-    source: string,
-    id: number,
-    gameId: number,
-    attendance: number,
-    comment: string
-  ) {
-    return this.request<AttendanceReportResponse>(`/shops/${source}/${id}/attendance`, 'POST', {
+  async reportAttendance(id: number, gameId: number, attendance: number, comment: string) {
+    return this.request<AttendanceReportResponse>(`/shops/${id}/attendance`, 'POST', {
       games: [{ id: gameId, currentAttendances: attendance }],
       comment
     });
