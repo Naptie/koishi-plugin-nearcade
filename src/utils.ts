@@ -51,7 +51,7 @@ export const compressDiscoverUrl = (
   longitude: number,
   radius: number,
   name: string,
-  baseUrl: string = 'https://nearcade.phizone.cn'
+  baseUrl: string = 'https://nearca.de'
 ): string => {
   // 1. Encode Latitude (5 chars)
   // We use Math.round to handle potential floating point inaccuracies
