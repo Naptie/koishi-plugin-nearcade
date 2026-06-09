@@ -15,8 +15,7 @@ import {
 import zhCN from '../locales/zh-CN.yml';
 import { compressDiscoverUrl } from './utils';
 
-type LegacyArcadeRow = Arcade & { source?: string | null };
-type LegacyAttendanceReportRow = AttendanceReport & { source?: string | null };
+type StoredArcadeRow = Arcade;
 
 declare module 'koishi' {
   interface Tables {
@@ -119,37 +118,10 @@ const tryParseCqJson = (text: string) => {
 
 const SHOP_ID_OFFSET_BEMANICN = 10000;
 const SHOP_ID_OFFSET_ZIV = 20000;
-const LEGACY_SHOP_SOURCES = ['bemanicn', 'ziv'] as const;
+const MIGRATION_VERSION_CURRENT = 1;
+const MIGRATION_VERSION_FAILED = 0;
 
-type LegacyShopSource = (typeof LEGACY_SHOP_SOURCES)[number];
-
-const normalizeSource = (source?: string | null) => source?.toLowerCase().trim();
-
-const isLegacyShopSource = (source?: string | null): source is LegacyShopSource =>
-  LEGACY_SHOP_SOURCES.includes(normalizeSource(source) as LegacyShopSource);
-
-const isUnifiedShopIdForSource = (source: LegacyShopSource, id: number) => {
-  if (source === 'bemanicn') return id >= SHOP_ID_OFFSET_BEMANICN;
-  if (source === 'ziv') return id >= SHOP_ID_OFFSET_ZIV;
-  return true;
-};
-
-const isPreMigrationShopReference = (shop: { id: number; source?: string | null }) => {
-  const normalized = normalizeSource(shop.source);
-  return isLegacyShopSource(normalized) && !isUnifiedShopIdForSource(normalized, shop.id);
-};
-
-const toUnifiedShopId = (source: string | undefined, id: number) => {
-  const normalized = normalizeSource(source);
-  if (normalized && isLegacyShopSource(normalized)) {
-    return isPreMigrationShopReference({ source: normalized, id })
-      ? normalized === 'bemanicn'
-        ? SHOP_ID_OFFSET_BEMANICN + id
-        : SHOP_ID_OFFSET_ZIV + id
-      : id;
-  }
-  return id;
-};
+const formatArcadeId = (shop: { id: number }) => `${shop.id}`;
 
 const dedupeText = (values: string[] = []) => {
   const seen = new Set<string>();
@@ -164,11 +136,6 @@ const dedupeText = (values: string[] = []) => {
   }
   return result;
 };
-
-const getUnifiedShopId = (shop: { id: number; source?: string }) =>
-  toUnifiedShopId(shop.source, shop.id);
-
-const formatArcadeId = (shop: { id: number; source?: string }) => `${getUnifiedShopId(shop)}`;
 
 const isSameGameExact = (left: Partial<Game>, right: Game) =>
   left.titleId === right.titleId &&
@@ -256,6 +223,19 @@ const mergeArcadeGameAliases = (entries: ArcadeGameAlias[] = [], shop?: Shop) =>
   return [...merged.values()];
 };
 
+const createMigratedArcade = (arcade: StoredArcadeRow, remoteShop: Shop): Arcade => ({
+  ...arcade,
+  id: remoteShop.id,
+  version: MIGRATION_VERSION_CURRENT,
+  defaultGame: resolveStoredGame(arcade.defaultGame, remoteShop) || getLowestGame(remoteShop),
+  gameAliases: mergeArcadeGameAliases(arcade.gameAliases || [], remoteShop)
+});
+
+const createMigrationFailedArcade = (arcade: StoredArcadeRow): Arcade => ({
+  ...arcade,
+  version: MIGRATION_VERSION_FAILED
+});
+
 const helpVersion = 6;
 
 export const apply = (ctx: Context) => {
@@ -269,6 +249,7 @@ export const apply = (ctx: Context) => {
     {
       _id: 'integer',
       id: 'integer',
+      version: 'integer',
       names: 'array',
       defaultGame: 'json',
       gameAliases: 'array',
@@ -350,6 +331,34 @@ export const apply = (ctx: Context) => {
 
   const shopCache = new Map<number, Promise<Shop | undefined>>();
 
+  const getArcadeMigrationVersion = (arcade: StoredArcadeRow) =>
+    typeof arcade.version === 'number' ? arcade.version : undefined;
+
+  const isArcadeMigrated = (arcade: StoredArcadeRow) =>
+    getArcadeMigrationVersion(arcade) === MIGRATION_VERSION_CURRENT;
+
+  const isArcadeMigrationFailed = (arcade: StoredArcadeRow) =>
+    getArcadeMigrationVersion(arcade) === MIGRATION_VERSION_FAILED;
+
+  const findRemoteShopMigrationTarget = async (arcade: StoredArcadeRow) => {
+    const primaryName = arcade.names[0]?.trim();
+    if (!primaryName) return undefined;
+
+    const searched = await client.findArcades(primaryName, 20, 20);
+    if (typeof searched === 'string') return undefined;
+
+    const exactMatches = searched.filter((shop) => shop.name.trim() === primaryName);
+    if (exactMatches.length >= 1) {
+      return exactMatches[0];
+    }
+
+    const fallbackIds = [SHOP_ID_OFFSET_BEMANICN + arcade.id, SHOP_ID_OFFSET_ZIV + arcade.id];
+    for (const candidateId of fallbackIds) {
+      const shop = await getShopById(candidateId);
+      if (shop) return shop;
+    }
+  };
+
   const getShopById = async (id: number) => {
     if (!shopCache.has(id)) {
       shopCache.set(
@@ -367,30 +376,29 @@ export const apply = (ctx: Context) => {
   const hasSameJsonValue = (left: unknown, right: unknown) =>
     JSON.stringify(left) === JSON.stringify(right);
 
-  const normalizeArcadeRecord = (arcade: LegacyArcadeRow, shop?: Shop): Arcade => {
-    const normalizedShopId = toUnifiedShopId(arcade.source ?? undefined, arcade.id);
+  const normalizeArcadeRecord = (arcade: StoredArcadeRow, shop?: Shop): Arcade => {
     const names = dedupeText(arcade.names);
-    const resolvedDefaultGame = shop
-      ? resolveStoredGame(arcade.defaultGame, shop) || getLowestGame(shop) || arcade.defaultGame
-      : arcade.defaultGame;
-    const resolvedAliases = shop
-      ? mergeArcadeGameAliases(arcade.gameAliases || [], shop)
-      : mergeArcadeGameAliases(arcade.gameAliases || []);
-
-    return {
+    const base: Arcade = {
       ...arcade,
-      id: normalizedShopId,
       names,
-      defaultGame: resolvedDefaultGame,
-      gameAliases: resolvedAliases
+      version: getArcadeMigrationVersion(arcade)
     };
+
+    if (!shop) {
+      return isArcadeMigrated(base) || isArcadeMigrationFailed(base)
+        ? base
+        : createMigrationFailedArcade(base);
+    }
+
+    return createMigratedArcade(base, shop);
   };
 
-  const persistArcade = async (arcade: LegacyArcadeRow, shop?: Shop) => {
+  const persistArcade = async (arcade: StoredArcadeRow, shop?: Shop) => {
     const normalized = normalizeArcadeRecord(arcade, shop);
     const updates: Partial<Arcade> = {};
 
     if (normalized.id !== arcade.id) updates.id = normalized.id;
+    if (normalized.version !== arcade.version) updates.version = normalized.version;
     if (!hasSameJsonValue(normalized.names, arcade.names)) updates.names = normalized.names;
     if (!hasSameJsonValue(normalized.defaultGame, arcade.defaultGame)) {
       updates.defaultGame = normalized.defaultGame;
@@ -406,46 +414,55 @@ export const apply = (ctx: Context) => {
     return normalized;
   };
 
-  const ensureArcadeCurrent = async (arcade: LegacyArcadeRow, shop?: Shop) => {
-    const liveShop =
-      shop || (await getShopById(toUnifiedShopId(arcade.source ?? undefined, arcade.id)));
+  const ensureArcadeCurrent = async (arcade: StoredArcadeRow, shop?: Shop) => {
+    let liveShop = shop;
+    if (!liveShop && !isArcadeMigrationFailed(arcade)) {
+      liveShop = isArcadeMigrated(arcade)
+        ? await getShopById(arcade.id)
+        : await findRemoteShopMigrationTarget(arcade);
+    }
     return persistArcade(arcade, liveShop);
   };
 
   const migrationPromise = (async () => {
-    const arcades = (await ctx.database.get('arcades', {})) as LegacyArcadeRow[];
-    const arcadeGroups = new Map<string, LegacyArcadeRow[]>();
+    const arcades = (await ctx.database.get('arcades', {})) as StoredArcadeRow[];
+    const arcadeGroups = new Map<string, StoredArcadeRow[]>();
 
     for (const arcade of arcades) {
-      const unifiedId = toUnifiedShopId(arcade.source ?? undefined, arcade.id);
-      const key = `${arcade.channelId}:${unifiedId}`;
+      const key = `${arcade.channelId}:${arcade.id}`;
       if (!arcadeGroups.has(key)) arcadeGroups.set(key, []);
       arcadeGroups.get(key)!.push(arcade);
     }
 
     for (const group of arcadeGroups.values()) {
       const primary = [...group].sort((a, b) => a._id - b._id)[0];
-      const unifiedId = toUnifiedShopId(primary.source ?? undefined, primary.id);
-      const shop = await getShopById(unifiedId);
+      const migratedPrimary = await ensureArcadeCurrent(primary);
       const earliest = [...group].sort(
         (a, b) => new Date(a.registeredAt).getTime() - new Date(b.registeredAt).getTime()
       )[0];
+      const mergedNames = dedupeText(group.flatMap((item) => item.names));
+      const liveShop =
+        migratedPrimary.version === MIGRATION_VERSION_CURRENT
+          ? await getShopById(migratedPrimary.id)
+          : undefined;
       const mergedAliases = mergeArcadeGameAliases(
         group.flatMap((item) => item.gameAliases || []),
-        shop
+        liveShop
       );
-      const mergedNames = dedupeText(group.flatMap((item) => item.names));
-      const resolvedDefaultGame = shop
-        ? group.map((item) => resolveStoredGame(item.defaultGame, shop)).find((item) => !!item) ||
-          getLowestGame(shop) ||
-          primary.defaultGame
-        : primary.defaultGame;
+      const resolvedDefaultGame = liveShop
+        ? group
+            .map((item) => resolveStoredGame(item.defaultGame, liveShop))
+            .find((item) => !!item) ||
+          getLowestGame(liveShop) ||
+          migratedPrimary.defaultGame
+        : migratedPrimary.defaultGame;
 
       await ctx.database.set(
         'arcades',
         { _id: primary._id },
         {
-          id: unifiedId,
+          id: migratedPrimary.id,
+          version: migratedPrimary.version,
           names: mergedNames,
           defaultGame: resolvedDefaultGame,
           gameAliases: mergedAliases,
@@ -460,31 +477,20 @@ export const apply = (ctx: Context) => {
       }
     }
 
-    const reports = (await ctx.database.get(
-      'attendanceReports',
-      {}
-    )) as LegacyAttendanceReportRow[];
-    const reportGroups = new Map<number, LegacyAttendanceReportRow[]>();
-
-    for (const report of reports) {
-      const unifiedId = toUnifiedShopId(report.source ?? undefined, report.id);
-      if (!reportGroups.has(unifiedId)) reportGroups.set(unifiedId, []);
-      reportGroups.get(unifiedId)!.push(report);
-    }
-
-    for (const [id, group] of reportGroups) {
-      const primary = [...group].sort((a, b) => b._id - a._id)[0];
-      await ctx.database.set(
-        'attendanceReports',
-        { _id: primary._id },
-        {
-          id
+    await Promise.all(
+      (await ctx.database.get('attendanceReports', {})).map(async (report) => {
+        const linkedArcades = await ctx.database.get('arcades', { id: report.id });
+        if (linkedArcades.length) return;
+        const candidate = arcades.find(
+          (arcade) => arcade.id === report.id || arcade._id === report.id
+        );
+        if (!candidate) return;
+        const migrated = await ensureArcadeCurrent(candidate);
+        if (migrated.id !== report.id) {
+          await ctx.database.set('attendanceReports', { _id: report._id }, { id: migrated.id });
         }
-      );
-      for (const duplicate of group.filter((item) => item._id !== primary._id)) {
-        await ctx.database.remove('attendanceReports', { _id: duplicate._id });
-      }
-    }
+      })
+    );
   })();
 
   ctx.on('ready', () => void migrationPromise);
@@ -493,7 +499,7 @@ export const apply = (ctx: Context) => {
 
   const getArcadesByChannelId = async (channelId: string) => {
     await ensureMigrated();
-    const arcades = (await ctx.database.get('arcades', { channelId })) as LegacyArcadeRow[];
+    const arcades = (await ctx.database.get('arcades', { channelId })) as StoredArcadeRow[];
     return Promise.all(arcades.map((arcade) => ensureArcadeCurrent(arcade)));
   };
 
@@ -545,7 +551,7 @@ export const apply = (ctx: Context) => {
   const bind = async (shop: Shop, aliases: string[] = [], session: Session) => {
     await ensureMigrated();
     const { channelId, userId, username } = getSessionContext(session);
-    const unifiedId = getUnifiedShopId(shop);
+    const unifiedId = shop.id;
     const exists = await ctx.database.get('arcades', {
       id: unifiedId,
       channelId

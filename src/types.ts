@@ -382,6 +382,7 @@ export interface Location {
 export interface Arcade {
   _id: number;
   id: number;
+  version?: number;
   names: string[];
   defaultGame: Game;
   gameAliases: ArcadeGameAlias[];
