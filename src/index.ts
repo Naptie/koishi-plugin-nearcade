@@ -334,11 +334,10 @@ export const apply = (ctx: Context) => {
   const getArcadeMigrationVersion = (arcade: StoredArcadeRow) =>
     typeof arcade.version === 'number' ? arcade.version : undefined;
 
-  const isArcadeMigrated = (arcade: StoredArcadeRow) =>
-    getArcadeMigrationVersion(arcade) === MIGRATION_VERSION_CURRENT;
+  const needsArcadeMigration = (arcade: StoredArcadeRow) =>
+    (getArcadeMigrationVersion(arcade) ?? -1) < MIGRATION_VERSION_CURRENT;
 
-  const isArcadeMigrationFailed = (arcade: StoredArcadeRow) =>
-    getArcadeMigrationVersion(arcade) === MIGRATION_VERSION_FAILED;
+  const isArcadeMigrated = (arcade: StoredArcadeRow) => !needsArcadeMigration(arcade);
 
   const findRemoteShopMigrationTarget = async (arcade: StoredArcadeRow) => {
     const primaryName = arcade.names[0]?.trim();
@@ -348,7 +347,7 @@ export const apply = (ctx: Context) => {
     if (typeof searched === 'string') return undefined;
 
     const exactMatches = searched.filter((shop) => shop.name.trim() === primaryName);
-    if (exactMatches.length >= 1) {
+    if (exactMatches.length === 1) {
       return exactMatches[0];
     }
 
@@ -385,9 +384,7 @@ export const apply = (ctx: Context) => {
     };
 
     if (!shop) {
-      return isArcadeMigrated(base) || isArcadeMigrationFailed(base)
-        ? base
-        : createMigrationFailedArcade(base);
+      return needsArcadeMigration(base) ? createMigrationFailedArcade(base) : base;
     }
 
     return createMigratedArcade(base, shop);
@@ -416,7 +413,7 @@ export const apply = (ctx: Context) => {
 
   const ensureArcadeCurrent = async (arcade: StoredArcadeRow, shop?: Shop) => {
     let liveShop = shop;
-    if (!liveShop && !isArcadeMigrationFailed(arcade)) {
+    if (!liveShop) {
       liveShop = isArcadeMigrated(arcade)
         ? await getShopById(arcade.id)
         : await findRemoteShopMigrationTarget(arcade);
@@ -424,7 +421,7 @@ export const apply = (ctx: Context) => {
     return persistArcade(arcade, liveShop);
   };
 
-  const migrationPromise = (async () => {
+  const syncArcades = async () => {
     const arcades = (await ctx.database.get('arcades', {})) as StoredArcadeRow[];
     const arcadeGroups = new Map<string, StoredArcadeRow[]>();
 
@@ -491,11 +488,21 @@ export const apply = (ctx: Context) => {
         }
       })
     );
-  })();
+  };
 
-  ctx.on('ready', () => void migrationPromise);
+  let migrationPromise: Promise<void> | undefined;
 
-  const ensureMigrated = () => migrationPromise;
+  const ensureMigrated = () => {
+    if (!migrationPromise) {
+      migrationPromise = syncArcades().catch((error) => {
+        migrationPromise = undefined;
+        throw error;
+      });
+    }
+    return migrationPromise;
+  };
+
+  ctx.on('ready', () => void ensureMigrated());
 
   const getArcadesByChannelId = async (channelId: string) => {
     await ensureMigrated();
