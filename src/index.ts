@@ -13,7 +13,9 @@ import {
   Shop
 } from './types';
 import zhCN from '../locales/zh-CN.yml';
-import { compressDiscoverUrl } from './utils';
+import { compressDiscoverUrl, DISCOVER_RADIUS_OPTIONS, radiusTravelTime } from './utils';
+import { renderDiscoverMap } from './map/render';
+import { collectHelpRows, renderHelpCard } from './help';
 
 type StoredArcadeRow = Arcade;
 
@@ -30,6 +32,18 @@ declare module 'koishi' {
 export const name = 'nearcade';
 export const inject = ['database'];
 
+export interface RegionBasemapConfig {
+  tileUrl?: string;
+  attribution?: string;
+}
+
+export interface DiscoverMapConfig {
+  enabled?: boolean;
+  basemaps?: Record<string, RegionBasemapConfig>;
+  walkLines?: boolean;
+  fontPath?: string;
+}
+
 export interface Config {
   urlBase: string;
   apiBase: string;
@@ -38,8 +52,8 @@ export interface Config {
   helpMessage?: string;
   helpOnMention?: boolean;
   customShops?: CustomShop[];
+  discoverMap?: DiscoverMapConfig;
 }
-
 export const Config: Schema<Config> = Schema.object({
   urlBase: Schema.string()
     .default('https://nearcade.cn')
@@ -57,7 +71,40 @@ export const Config: Schema<Config> = Schema.object({
     })
   )
     .default([])
-    .description('自定义机厅列表')
+    .description('自定义机厅列表'),
+  discoverMap: Schema.object({
+    enabled: Schema.boolean().default(true).description('发现机厅时附带发送地图图片'),
+    basemaps: Schema.dict(
+      Schema.object({
+        tileUrl: Schema.string()
+          .required()
+          .description('底图瓦片服务地址模板（{x} {y} {z} {s}），含 .mvt 时按矢量底图渲染'),
+        attribution: Schema.string().description('地图角落显示的底图归属标注')
+      })
+    )
+      .default({
+        // 境内使用必应中国矢量底图（微软中国地图服务，GCJ-02 与 nearcade 数据
+        // 一致、免鉴权、无注记，归属含境内审图号），其余地区使用 Esri 暗色
+        // 无注记底图（WGS-84）
+        CN: {
+          tileUrl:
+            'https://dynamic.t0.tiles.ditu.live.com/comp/ch/{z}-{x}-{y}.mvt?mkt=zh-CN,en-us&it=G,LC,AP,L,LA&jp=0&js=1&tj=1&ur=cn&cstl=s23&mvt=1&features=mvt,mvtfcall,lsoft,mvtfontinfo,mvttxtmaxw&og=1009&st=bld|v:0_g|pv:1&sv=9.38',
+          attribution: '© 微软必应'
+        },
+        '*': {
+          tileUrl:
+            'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+          attribution: '© Esri'
+        }
+      })
+      .description(
+        '按国家/地区自定义底图：键为机厅行政区划（region）首元素的国家/地区代码（如 CN、JP），* 表示其余地区。境内公开地图须使用经审图备案的境内服务（默认必应中国矢量底图，GCJ-02 与数据一致，无需坐标转换）；如需高德栅格底图可将 CN 的 tileUrl 设为 https://wprd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scl=2&style=7&x={x}&y={y}&z={z}（亮色瓦片会自动应用暗色滤镜）'
+      ),
+    walkLines: Schema.boolean().default(true).description('在地图上绘制地铁站到机厅之间的步行虚线'),
+    fontPath: Schema.string().description(
+      '系统缺少中文字体时，填写中文字体文件或其所在目录的路径（多个用 ; 分隔）'
+    )
+  }).description('发现结果地图')
 });
 
 const gameTitles: Array<{ titleId: number; names: string[] }> = [
@@ -100,6 +147,24 @@ const attendanceOperators = ['=', '＝', '🟰', ...plusOperators, ...minusOpera
 
 const isPlus = (op: string) => plusOperators.includes(op as (typeof plusOperators)[number]);
 const isMinus = (op: string) => minusOperators.includes(op as (typeof minusOperators)[number]);
+
+// 自动搜索（未绑定机厅的名称联网匹配）的查询资格下限：≥2 个汉字，或 ≥4 个
+// 字母/数字且至少含一个字母。更短的字符串（ap、max、827 之类的闲聊片段）不
+// 足以唯一指代一个机厅，不应触发联网搜索；绑定机厅与自定义机厅的匹配不受此
+// 限制。命中名称后由服务端 name 筛选精确返回（见 client.findArcadesPage）。
+// 超过服务端 name 筛选值长度上限（nearcade shop-filter schema 的 64）的查询
+// 无法作为有效筛选下发，同样不具备搜索资格。
+export const SHOP_FILTER_MAX_NAME_LENGTH = 64;
+export const isSearchableQuery = (query: string) => {
+  if (query.length > SHOP_FILTER_MAX_NAME_LENGTH) return false;
+  if ((query.match(/\p{Script=Han}/gu)?.length ?? 0) >= 2) return true;
+  const stripped = query.replace(/[^\p{L}\p{N}]/gu, '');
+  return stripped.length >= 4 && /\p{L}/u.test(query);
+};
+
+// 自动搜索一次最多考虑的匹配数：超过视为查询过于宽泛，静默忽略；2 到该值之间
+// 的命中仍会回复列表供用户消歧。
+const AUTOSEARCH_MAX_MATCHES = 10;
 
 const decodeHtmlEntities = (str: string) =>
   str
@@ -235,8 +300,6 @@ const createMigrationFailedArcade = (arcade: StoredArcadeRow): Arcade => ({
   ...arcade,
   version: MIGRATION_VERSION_FAILED
 });
-
-const helpVersion = 6;
 
 export const apply = (ctx: Context) => {
   const client = new Client(ctx.config.apiBase, ctx.config.apiToken);
@@ -660,8 +723,14 @@ export const apply = (ctx: Context) => {
 
   const toForwarded = (text: string) => `<message forward>${text}</message>`;
 
+  // 帮助图片在插件加载时按实例生成（前缀取 app 配置前缀列表的首项，与具体消息
+  // 无关）；未完成或失败时回退到远程图片
+  let helpImage: Buffer | undefined;
+
   const getHelpMessage = () => {
-    let message = h('img', { src: `${urlBase}/bot-help.png?v=${helpVersion}` });
+    let message = helpImage
+      ? h.image(helpImage, 'image/png')
+      : h('img', { src: `${urlBase}/bot-help.png` });
     if (ctx.config.helpMessage) {
       message = h('p', ctx.config.helpMessage, message);
     }
@@ -715,6 +784,26 @@ export const apply = (ctx: Context) => {
           const latitude = query.lat;
           const longitude = query.lng;
           if (latitude && longitude) {
+            // 立即回应请求：给原消息贴一个表情，让用户知道机器人已收到
+            // 并正在处理（NapCat 扩展接口，其他适配器上自动跳过）
+            try {
+              const onebot = (
+                session as unknown as {
+                  onebot?: {
+                    setMsgEmojiLike?: (
+                      messageId: string,
+                      emojiId: string,
+                      set?: boolean
+                    ) => Promise<void>;
+                  };
+                }
+              ).onebot;
+              if (onebot?.setMsgEmojiLike && session.messageId) {
+                await onebot.setMsgEmojiLike(session.messageId, '124');
+              }
+            } catch (error) {
+              ctx.logger('nearcade').warn('设置消息表情回应失败：', error);
+            }
             const radius = settings?.radius || 10;
             const result = await client.discoverArcades(latitude, longitude, radius, name);
             if (typeof result === 'string') {
@@ -722,9 +811,25 @@ export const apply = (ctx: Context) => {
               return;
             }
             const lines = [];
+            const mapConfig = ctx.config.discoverMap;
+            // 地图渲染与文本构建并行进行：文本结果先发送、不等地图就绪；
+            // 渲染失败时记录日志并跳过地图发送
+            const mapPromise =
+              result.shops.length && mapConfig?.enabled !== false
+                ? renderDiscoverMap(result, {
+                    basemaps: mapConfig?.basemaps,
+                    fontPath: mapConfig?.fontPath,
+                    walkLines: mapConfig?.walkLines
+                  }).catch((error) => {
+                    ctx.logger('nearcade').warn('渲染发现结果地图失败：', error);
+                    return null;
+                  })
+                : null;
             if (result.shops.length) {
-              lines.push(`${name ? `「${name}」` : ''}周围 ${radius} 千米内找到以下机厅：`);
-              for (const shop of result.shops) {
+              lines.push(
+                `${name ? `「${name}」` : ''}周围 ${result.radius} 千米 · ${radiusTravelTime(result.radius)}内找到以下机厅：`
+              );
+              for (const [index, shop] of result.shops.entries()) {
                 let reporter: string | null = null;
                 const currentAttendance = shop.currentReportedAttendance;
                 if (currentAttendance) {
@@ -738,21 +843,40 @@ export const apply = (ctx: Context) => {
                   }
                 }
                 lines.push(
-                  `-「${shop.name}」${formatDistance(shop.distance)} ${shop.totalAttendance} 人${reporter && currentAttendance ? ` [${reporter} @ ${new Date(currentAttendance.reportedAt).toLocaleTimeString()}]` : ''}`
+                  `${index + 1}.「${shop.name}」${formatDistance(shop.distance)} ${shop.totalAttendance} 人${reporter && currentAttendance ? ` [${reporter} @ ${new Date(currentAttendance.reportedAt).toLocaleTimeString()}]` : ''}`
                 );
               }
             } else {
-              lines.push(`${name ? `「${name}」` : ''}周围 ${radius} 千米内未找到机厅。`);
+              lines.push(
+                `${name ? `「${name}」` : ''}周围 ${result.radius} 千米 · ${radiusTravelTime(result.radius)}内未找到机厅。`
+              );
             }
             lines.push(
               `有关更多信息，请访问 ${compressDiscoverUrl(latitude, longitude, radius, name, urlBase)}`
             );
             const message = lines.join('\n');
             await session.send(result.shops.length > 3 ? toForwarded(message) : message);
+            // 地图图片以引用回复的形式发送，明确对应哪条请求
+            if (mapPromise) {
+              const image = await mapPromise;
+              if (image) {
+                await session.send(
+                  session.messageId
+                    ? [h.quote(session.messageId), h.image(image, 'image/png')]
+                    : h.image(image, 'image/png')
+                );
+              }
+            }
             return;
           }
         }
       }
+    }
+    // 仅对纯文本消息做机厅查询/上报解析：卡片、图片、Markdown、转发等消息的
+    // 渲染文本（JSON 片段、图片 URL、打卡播报等）会拼进 content 并被逐行解析，
+    // 触发误报查询；引用回复的 quote 元素由适配器移出 elements，不影响判定。
+    if (session.elements && !session.elements.every((element) => element.type === 'text')) {
+      return;
     }
     if (lowerContent === 'nearcade' && ctx.config.helpOnMention !== false) {
       await session.send(getHelpMessage());
@@ -772,18 +896,23 @@ export const apply = (ctx: Context) => {
         item.names.some((name) => name.trim().toLowerCase() === query)
       );
       if (matched.length === 0 && !(!query || ['机厅', 'jt'].includes(query))) {
-        if (query.replace(/[^\p{L}\p{N}_]/gu, '').length < 2) {
-          return;
+        if (isSearchableQuery(query)) {
+          const page = await client.findArcadesPage('', AUTOSEARCH_MAX_MATCHES, {
+            name: { value: query, mode: 'contains' }
+          });
+          if (typeof page === 'string') {
+            await session.send(`查询机厅失败：${page}`);
+            return;
+          }
+          // 匹配数超过上限视为查询过于宽泛（如闲聊片段），保持静默；自定义
+          // 机厅为精确别名命中，不受此影响。
+          if (page.totalCount <= AUTOSEARCH_MAX_MATCHES) {
+            matched = page.shops.map((shop) => ({
+              id: shop.id,
+              names: [shop.name]
+            }));
+          }
         }
-        const result = await client.findArcades(query);
-        if (typeof result === 'string') {
-          await session.send(`查询机厅失败：${result}`);
-          return;
-        }
-        matched = result.map((shop) => ({
-          id: shop.id,
-          names: [shop.name]
-        }));
         if (!matched.length && !customShop) {
           return;
         }
@@ -883,6 +1012,10 @@ export const apply = (ctx: Context) => {
     }[] = [];
     const settings = (await ctx.database.get('groupSettings', { channelId }))[0];
     const allowSearch = settings?.search !== false;
+    // 绑定机厅列表在同一消息内只取一次；普通聊天消息没有可解析的上报行时完
+    // 全不产生该查询。
+    let boundArcades: Arcade[] | null = null;
+    const getBoundArcades = async () => (boundArcades ??= await getArcadesByChannelId(channelId));
     for (const line of content.split('\n')) {
       let operator: (typeof attendanceOperators)[number] | undefined,
         left: string | undefined,
@@ -906,7 +1039,7 @@ export const apply = (ctx: Context) => {
       if (!left) {
         continue;
       }
-      if (left.replace(/[^\p{L}\p{N}_]/gu, '').length < 2) {
+      if (!isSearchableQuery(left)) {
         doSearch = false;
       }
       if (!operator) {
@@ -939,71 +1072,87 @@ export const apply = (ctx: Context) => {
         continue;
       }
       let success = false;
-      const arcades = await getArcadesByChannelId(channelId);
-      for (const arcade of arcades) {
-        let gameId = arcade.defaultGame.gameId;
-        const arcadeData = await client.getArcade(arcade.id);
-        if (typeof arcadeData === 'string') continue;
-        const currentArcade = await ensureArcadeCurrent(arcade, arcadeData.shop);
-        success = currentArcade.names.includes(left);
-        if (!success) {
-          for (let i = 1; i < left.length; i++) {
-            const arcadeName = left.slice(0, i).toLowerCase().trim();
-            if (!currentArcade.names.includes(arcadeName)) continue;
-            const gameName = left.slice(i).toLowerCase().trim();
-            const aliasedGameId = currentArcade.gameAliases.find((g) =>
-              g.aliases.includes(gameName)
-            )?.gameId;
-            if (aliasedGameId !== undefined) {
-              gameId = aliasedGameId;
-              success = true;
-              break;
-            } else {
-              const titleMatchedGameId = arcadeData.shop.games.find(
-                (g) => g.titleId === gameTitles.find((g) => g.names.includes(gameName))?.titleId
+      const arcades = await getBoundArcades();
+      // 仅当某个绑定机厅名称等于 left 或为其前缀（「机厅名+机台名」拆分形式）
+      // 时才可能命中；否则整段跳过，避免成绩播报等无关行触发成串的机厅详情
+      // 请求。
+      const canMatch = arcades.some((arcade) =>
+        (arcade.names ?? []).some((name) => {
+          const normalized = name.trim().toLowerCase();
+          return !!normalized && (left === normalized || left.startsWith(normalized));
+        })
+      );
+      if (canMatch) {
+        for (const arcade of arcades) {
+          let gameId = arcade.defaultGame.gameId;
+          const arcadeData = await client.getArcade(arcade.id);
+          if (typeof arcadeData === 'string') continue;
+          const currentArcade = await ensureArcadeCurrent(arcade, arcadeData.shop);
+          success = currentArcade.names.includes(left);
+          if (!success) {
+            for (let i = 1; i < left.length; i++) {
+              const arcadeName = left.slice(0, i).toLowerCase().trim();
+              if (!currentArcade.names.includes(arcadeName)) continue;
+              const gameName = left.slice(i).toLowerCase().trim();
+              const aliasedGameId = currentArcade.gameAliases.find((g) =>
+                g.aliases.includes(gameName)
               )?.gameId;
-              if (titleMatchedGameId !== undefined) {
-                gameId = titleMatchedGameId;
+              if (aliasedGameId !== undefined) {
+                gameId = aliasedGameId;
                 success = true;
                 break;
+              } else {
+                const titleMatchedGameId = arcadeData.shop.games.find(
+                  (g) => g.titleId === gameTitles.find((g) => g.names.includes(gameName))?.titleId
+                )?.gameId;
+                if (titleMatchedGameId !== undefined) {
+                  gameId = titleMatchedGameId;
+                  success = true;
+                  break;
+                }
               }
             }
           }
-        }
-        if (success) {
-          reportQueue.push({
-            count,
-            operator,
-            gameId,
-            shop: arcadeData.shop
-          });
-          break;
+          if (success) {
+            reportQueue.push({
+              count,
+              operator,
+              gameId,
+              shop: arcadeData.shop
+            });
+            break;
+          }
         }
       }
       if (!success && doSearch && allowSearch) {
-        const matched = await client.findArcades(left, 5);
-        if (typeof matched === 'string') {
-          await session.send(`查询机厅失败：${matched}`);
+        // 未绑定机厅：按机厅名称精确匹配（服务端 name 筛选，子串、大小写不
+        // 敏感、totalCount 为真实总数），替代原先的模糊全文搜索。
+        const page = await client.findArcadesPage('', AUTOSEARCH_MAX_MATCHES, {
+          name: { value: left, mode: 'contains' }
+        });
+        if (typeof page === 'string') {
+          await session.send(`查询机厅失败：${page}`);
           continue;
         }
-        if (matched.length === 0) continue;
-        if (matched.length > 1) {
+        // 0 个匹配静默忽略；超过上限视为查询过于宽泛，同样静默。
+        if (page.totalCount === 0 || page.totalCount > AUTOSEARCH_MAX_MATCHES) continue;
+        if (page.shops.length > 1) {
           await session.send(
             '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
-              matched.map((item) => `- ${item.name}`).join('\n')
+              page.shops.map((item) => `- ${item.name}`).join('\n')
           );
           continue;
         }
-        const defaultGame = getDefaultGame(matched[0]);
+        const defaultGame = getDefaultGame(page.shops[0]);
         if (!defaultGame) {
-          await session.send(`机厅「${matched[0].name}」未收录任何机台，无法上报在勤人数。`);
+          await session.send(`机厅「${page.shops[0].name}」未收录任何机台，无法上报在勤人数。`);
           continue;
         }
         reportQueue.push({
           count,
           operator,
           gameId: defaultGame.gameId,
-          shop: matched[0]
+          shop: page.shops[0]
         });
       }
     }
@@ -1019,13 +1168,13 @@ export const apply = (ctx: Context) => {
     );
   });
 
-  ctx.command('nearcade').action(() => {
+  ctx.command('nearcade', '查看 nearcade 帮助').action(() => {
     return getHelpMessage();
   });
 
   ctx
     .command('nearcade')
-    .subcommand('discover <option>')
+    .subcommand('discover [{开/on/关/off}/半径]', '查看/修改群聊附近机厅探索设置')
     .alias(
       '附近机厅',
       '探索附近',
@@ -1039,6 +1188,8 @@ export const apply = (ctx: Context) => {
       '查找附近',
       '查找附近机厅'
     )
+    .example('off')
+    .example('10')
     .action(async ({ session }, optionStr) => {
       if (!session) return '会话不可用。';
       const option = (optionStr || '').trim().toLowerCase();
@@ -1064,7 +1215,7 @@ export const apply = (ctx: Context) => {
           `该项设置最后由 ${settings.operatorName} (${settings.operatorId}) 于 ${new Date(settings.updatedAt).toLocaleString()} 修改。\n`,
           '发送“discover 关/off”关闭探索功能；\n',
           '发送“discover 开/on”开启探索功能；\n',
-          '发送“discover <数字>”设置探索半径（范围 1~30 千米）。'
+          '发送“discover <数字>”设置探索半径（支持 1、2、5、10、20、30 千米）。'
         );
       }
       if (['关', '关掉', '关闭', 'off', 'close'].includes(option)) {
@@ -1100,8 +1251,8 @@ export const apply = (ctx: Context) => {
         return '已开启本群的附近机厅探索功能。';
       }
       const radius = parseFloat(option);
-      if (isNaN(radius) || radius < 1 || radius > 30 || radius.toString() !== option) {
-        return '半径参数无效，请输入 1~30 之间的数字。';
+      if (!DISCOVER_RADIUS_OPTIONS.includes(radius)) {
+        return '半径参数无效，支持的探索半径为 1、2、5、10、20、30 千米。';
       }
       if (settings.radius === radius) {
         return `本群的附近机厅探索半径已是 ${radius} 千米。`;
@@ -1121,8 +1272,10 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('privacy <option>')
+    .subcommand('privacy [{开/on/关/off}]', '查看/修改群聊隐私设置')
     .alias('隐私设置', '群组隐私')
+    .example('on')
+    .example('关')
     .action(async ({ session }, optionStr) => {
       if (!session) return '会话不可用。';
       const option = (optionStr || '').trim().toLowerCase();
@@ -1185,8 +1338,10 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('autosearch <option>')
+    .subcommand('autosearch [{开/on/关/off}]', '查看/修改群聊报卡自动搜索设置')
     .alias('自动搜索', '搜索上报')
+    .example('on')
+    .example('关')
     .action(async ({ session }, optionStr) => {
       if (!session) return '会话不可用。';
       const option = (optionStr || '').trim().toLowerCase();
@@ -1208,6 +1363,9 @@ export const apply = (ctx: Context) => {
           'p',
           `本群自动搜索功能当前处于${settings.search !== false ? '开启' : '关闭'}状态。\n`,
           `该项设置最后由 ${settings.operatorName} (${settings.operatorId}) 于 ${new Date(settings.updatedAt).toLocaleString()} 修改。\n`,
+          '自动搜索按机厅名称精确匹配（子串、大小写不敏感）：查询需至少 2 个汉字，或 4 个以上字母/数字且含字母；\n',
+          '命中 1 家机厅时直接上报，命中多家时回复列表供消歧，无命中或命中过多（超过 10 家）时静默忽略；\n',
+          '已绑定机厅与自定义机厅的名称、别名不受上述限制。\n',
           '发送“autosearch 关/off”关闭自动搜索（仅允许上报已绑定机厅）；\n',
           '发送“autosearch 开/on”开启自动搜索（允许上报未绑定机厅）。'
         );
@@ -1249,8 +1407,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('bind <query>')
+    .subcommand('bind <查询字符串>', '将机厅绑定至群聊')
     .alias('绑定机厅', '添加机厅', 'add')
+    .example('番禺天河')
     .action(async ({ session }, ...segments) => {
       if (!session) return '会话不可用。';
       const query = segments.join(' ');
@@ -1294,8 +1453,10 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('search <query>')
+    .subcommand('search <查询字符串>', '搜索机厅')
     .alias('查找机厅', '搜索机厅', '搜寻机厅', '寻找机厅', 'query', 'find')
+    .example('城市英雄')
+    .example('Tokyo')
     .action(async (_, ...segments) => {
       const query = segments.join(' ');
       if (query.trim().length === 0) {
@@ -1324,7 +1485,7 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('list')
+    .subcommand('list', '查看群聊已绑机厅')
     .alias('机厅列表')
     .action(async ({ session }) => {
       if (!session) return '会话不可用。';
@@ -1336,8 +1497,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('unbind <name>')
+    .subcommand('unbind <机厅名/别名/ID>', '将机厅从群聊解绑')
     .alias('解绑机厅', '删除机厅', 'remove')
+    .example('10721')
     .action(async ({ session }, ...segments) => {
       if (!session) return '会话不可用。';
       const { channelId } = getSessionContext(session);
@@ -1376,8 +1538,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('alias.add <name> [...aliases]')
+    .subcommand('alias.add <机厅名/别名/ID> [...别名]', '为已绑机厅添加机厅别名')
     .alias('添加别名', '添加机厅别名')
+    .example('e 鹅鹅鹅 曲项向天歌')
     .action(async ({ session }, name, ...aliases) => {
       if (!aliases.length) return '请至少提供一个别名。';
       if (!session) return '会话不可用。';
@@ -1401,8 +1564,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('alias.remove <name> [...aliases]')
+    .subcommand('alias.remove <机厅名/别名/ID> [...别名]', '为已绑机厅移除机厅别名')
     .alias('删除别名', '删除机厅别名')
+    .example('e 鹅鹅鹅 曲项向天歌')
     .action(async ({ session }, name, ...aliases) => {
       if (!aliases.length) return '请至少提供一个别名。';
       if (!session) return '会话不可用。';
@@ -1426,8 +1590,10 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('info <name>')
+    .subcommand('info <机厅名/别名/ID/查询字符串>', '查看已绑/任一机厅详情')
     .alias('查询机厅', '机厅详情', '机厅信息', '机厅')
+    .example('e')
+    .example('旺角新之城')
     .action(async ({ session }, ...segments) => {
       if (!session) return '会话不可用。';
       const { channelId } = getSessionContext(session);
@@ -1490,8 +1656,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('default-game <name> <gameId>')
+    .subcommand('default-game <机厅名/别名/ID> <机台ID>', '为已绑机厅修改默认机台')
     .alias('设置默认机台', '默认机台', '设置默认游戏', '默认游戏')
+    .example('e 10721000')
     .action(async ({ session }, name, gameIdStr) => {
       const gameId = parseInt(gameIdStr);
       if (isNaN(gameId)) return '无效的机台 ID。';
@@ -1519,8 +1686,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('alias.game.add <name> <gameId> [...aliases]')
+    .subcommand('alias.game.add <机厅名/别名/ID> <机台ID> [...别名]', '为已绑机厅添加机台别名')
     .alias('添加机台别名', '添加游戏别名')
+    .example('e 10721001 qnzm')
     .action(async ({ session }, name, gameIdStr, ...aliases) => {
       if (!aliases.length) return '请至少提供一个别名。';
       const gameId = parseInt(gameIdStr);
@@ -1560,8 +1728,9 @@ export const apply = (ctx: Context) => {
 
   ctx
     .command('nearcade')
-    .subcommand('alias.game.remove <name> <gameId> [...aliases]')
+    .subcommand('alias.game.remove <机厅名/别名/ID> <机台ID> [...别名]', '为已绑机厅移除机台别名')
     .alias('删除机台别名', '删除游戏别名')
+    .example('e 10721001 qnzm')
     .action(async ({ session }, name, gameIdStr, ...aliases) => {
       if (!aliases.length) return '请至少提供一个别名。';
       const gameId = parseInt(gameIdStr);
@@ -1592,5 +1761,17 @@ export const apply = (ctx: Context) => {
       const gameAliases = normalizedArcade.gameAliases.filter((item) => item.aliases.length > 0);
       await ctx.database.set('arcades', { _id: arcade._id }, { gameAliases });
       return `机台「${printGame(game)}」已成功删除别名：${existingAliases.join('，')}。`;
+    });
+
+  // 帮助图片在插件加载时按实例生成一次：前缀取 app 配置前缀列表的首项，
+  // 与具体消息无关；渲染失败时保持 undefined，回退到远程图片
+  const prefixes = ctx.app.config.prefix;
+  const instancePrefix = (Array.isArray(prefixes) ? prefixes[0] : prefixes) ?? '';
+  renderHelpCard(collectHelpRows(ctx, instancePrefix), ctx.config.discoverMap?.fontPath)
+    .then((image) => {
+      helpImage = image;
+    })
+    .catch((error) => {
+      ctx.logger('nearcade').warn('生成帮助图片失败，将回退到远程图片：', error);
     });
 };

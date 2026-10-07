@@ -42,6 +42,32 @@ const stringToBase64Url = (str: string): string => {
 };
 
 /**
+ * 搜索半径对应的地铁通行时间预算，与 nearcade 网站发现页的半径选项一致。
+ * discover API 会把传入的半径吸附到这些档位后回显，因此可精确匹配。
+ */
+const RADIUS_TRAVEL_TIMES: Array<[number, string]> = [
+  [1, '15 分钟'],
+  [2, '30 分钟'],
+  [5, '45 分钟'],
+  [10, '1 小时'],
+  [20, '1 时 30 分'],
+  [30, '2 小时']
+];
+
+/** 网站呈现的探索半径选项（即上述档位的千米值），设置命令仅接受这些值 */
+export const DISCOVER_RADIUS_OPTIONS = RADIUS_TRAVEL_TIMES.map(([km]) => km);
+
+export const radiusTravelTime = (radius: number): string => {
+  const exact = RADIUS_TRAVEL_TIMES.find(([km]) => km === radius);
+  if (exact) return exact[1];
+  let nearest = RADIUS_TRAVEL_TIMES[0];
+  for (const entry of RADIUS_TRAVEL_TIMES) {
+    if (Math.abs(entry[0] - radius) < Math.abs(nearest[0] - radius)) nearest = entry;
+  }
+  return nearest[1];
+};
+
+/**
  * Compresses location data into a URL string.
  * @param baseUrl The base URL of the website
  * @returns A full URL with the compressed 'd' parameter.

@@ -8,6 +8,9 @@ yarn-debug.log
 yarn-error.log
 tsconfig.tsbuildinfo
 
+# 本地开发产物与临时脚本（自忽略目录，内含 .gitignore）
+local
+
 .eslintcache
 .DS_Store
 .idea
@@ -16,3 +19,6 @@ tsconfig.tsbuildinfo
 *.ntvs*
 *.njsproj
 *.sln
+
+# 本地开发产物与临时脚本（目录内含自忽略 .gitignore）
+local

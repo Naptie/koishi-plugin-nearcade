@@ -68,7 +68,153 @@ export interface DiscoverResponse {
      * 店铺综合在勤人数
      */
     totalAttendance?: number;
+    /**
+     * 公共交通信息
+     */
+    transit?: ShopTransit;
   })[];
+  /**
+   * 结果数量上限
+   */
+  limit?: number;
+  /**
+   * 地铁网络信息，当原点吸附到地铁站且存在经地铁可达的店铺时返回
+   */
+  metro?: DiscoverMetroBlock;
+}
+
+/**
+ * 地铁线路徽标
+ */
+export interface MetroLineBadge {
+  id: string;
+  name: string;
+  names: {
+    zh: string;
+    en: string;
+  };
+  /**
+   * 官方线路色，形如 #e3002b
+   */
+  color: null | string;
+  /**
+   * 线路短代号，如 “1”、“17”
+   */
+  shortName: string;
+}
+
+/**
+ * 店铺公共交通信息
+ */
+export interface ShopTransit {
+  /**
+   * 店铺最近地铁站及线路
+   */
+  metro?: ShopMetroTransit;
+}
+
+/**
+ * 店铺最近地铁站
+ */
+export interface ShopMetroTransit {
+  networkId: string;
+  stationId: string;
+  stationName: string;
+  names: {
+    zh: string;
+    en: string;
+  };
+  /**
+   * 步行至地铁站耗时，秒
+   */
+  walkSeconds: number;
+  /**
+   * 步行距离，km
+   */
+  distanceKm: number;
+  lines: MetroLineBadge[];
+}
+
+/**
+ * 地铁行程中的一段
+ */
+export interface MetroLegPlan {
+  kind: 'ride' | 'transfer';
+  /**
+   * 乘车段对应的线路 ID
+   */
+  lineId?: string;
+  /**
+   * 该段经过的地铁站 ID 序列
+   */
+  stationIds: string[];
+  /**
+   * 该段耗时，秒
+   */
+  seconds: number;
+  distanceKm?: number;
+  direction?: string;
+}
+
+/**
+ * 原点至店铺的地铁行程
+ */
+export interface MetroShopItinerary {
+  totalSeconds: number;
+  rideSeconds: number;
+  transferCount: number;
+  legs: MetroLegPlan[];
+}
+
+/**
+ * 地铁站点
+ */
+export interface MetroStation {
+  name: string;
+  names: {
+    zh: string;
+    en: string;
+  };
+  lon: number;
+  lat: number;
+}
+
+/**
+ * 发现结果附带的地铁网络块
+ */
+export interface DiscoverMetroBlock {
+  network: {
+    id: string;
+    name: string;
+    names: {
+      zh: string;
+      en: string;
+    };
+    cityRegionId: string;
+  };
+  /**
+   * 原点吸附的地铁站
+   */
+  origin: {
+    stationId: string;
+    stationName: string;
+    names: {
+      zh: string;
+      en: string;
+    };
+    /**
+     * 原点步行至地铁站耗时，秒
+     */
+    walkSeconds: number;
+    lon: number;
+    lat: number;
+  };
+  lines: Record<string, MetroLineBadge>;
+  stations: Record<string, MetroStation>;
+  /**
+   * 以店铺 ID 为键的原点 → 店铺地铁行程
+   */
+  shops: Record<string, MetroShopItinerary>;
 }
 
 /**
@@ -327,6 +473,14 @@ export interface Address {
    * 大致地址，一般为：[国家/地区, 省, 市, 区]
    */
   general: string[];
+  /**
+   * 行政区划层级列表，首元素为国家/地区（中国大陆为 CN）。
+   * name 为已本地化的纯文本。
+   */
+  region?: Array<{
+    id: string;
+    name: string;
+  }>;
 }
 
 export interface Game {
