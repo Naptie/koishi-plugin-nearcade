@@ -10,10 +10,18 @@
  */
 
 import { gunzipSync } from 'node:zlib';
-import { VectorTile } from '@mapbox/vector-tile';
-import { PbfReader } from 'pbf';
 import { expandTileTemplate, getTile } from './basemap';
 import { createCanvas, type Canvas, type SKRSContext2D } from '@napi-rs/canvas';
+
+// @mapbox/vector-tile ≥2 与 pbf ≥4 为纯 ESM 包，顶层 import 打包后会变成 require() 并在 Node < 22.12 抛错
+let vectorTile: typeof import('@mapbox/vector-tile');
+let pbf: typeof import('pbf');
+
+async function loadDecoder() {
+  vectorTile ??= await import('@mapbox/vector-tile');
+  pbf ??= await import('pbf');
+  return { VectorTile: vectorTile.VectorTile, PbfReader: pbf.PbfReader };
+}
 
 // ---------------------------------------------------------------------------
 // 暗色风格（取自 amap://styles/dark 的真实配色）
@@ -163,7 +171,7 @@ interface RawFeature {
   geom: { x: number; y: number }[][];
 }
 
-function decodeTile(buffer: Buffer): Record<string, RawFeature[]> | null {
+async function decodeTile(buffer: Buffer): Promise<Record<string, RawFeature[]> | null> {
   let payload = buffer;
   if (payload.length > 2 && payload[0] === 0x1f && payload[1] === 0x8b) {
     try {
@@ -172,6 +180,7 @@ function decodeTile(buffer: Buffer): Record<string, RawFeature[]> | null {
       return null;
     }
   }
+  const { VectorTile, PbfReader } = await loadDecoder();
   try {
     const vt = new VectorTile(new PbfReader(payload));
     const layers: Record<string, RawFeature[]> = {};
@@ -252,7 +261,7 @@ function strokeLines(
   }
 }
 
-function drawVectorTile(
+async function drawVectorTile(
   ctx: SKRSContext2D,
   buffer: Buffer,
   px: number,
@@ -261,7 +270,7 @@ function drawVectorTile(
   zEff: number,
   dpr: number
 ) {
-  const layers = decodeTile(buffer);
+  const layers = await decodeTile(buffer);
   if (!layers) return;
   const s = sizeDev / 4096;
 
@@ -400,7 +409,7 @@ export async function stitchVectorBasemap(options: VectorStitchOptions): Promise
         const px1 = Math.round(((tx + 1) * 256 - viewX0z) * scale);
         const py = Math.round((ty * 256 - viewY0z) * scale);
         // Mercator 瓦片为正方形，纵向尺寸与横向一致
-        drawVectorTile(ctx, buffer, px, py, px1 - px, zEff, dpr);
+        await drawVectorTile(ctx, buffer, px, py, px1 - px, zEff, dpr);
       };
       jobs.push(draw());
     }
