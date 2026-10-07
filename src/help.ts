@@ -324,21 +324,71 @@ const SUBTITLE_BRAND = 'nearcade';
 const SUBTITLE_TEXT = ' 官方 QQ 交流群: 1047949663';
 
 /**
- * 用墨迹度量（actualBoundingBox*，而非随字体胀缩的行盒度量）推导头部基线与
- * 表格上缘：标题基线按行盒顶对齐页面上缘，副标题墨迹顶距标题墨迹底
- * SUBTITLE_GAP，表格上缘取「副标题墨迹底 + HEADER_GAP」与「字标下缘 +
- * LOGO_GAP」中的较大者。在独立画布上度量，供 computeLayout 在建画布前使用。
+ * 光栅化扫描真实墨迹范围（相对基线，单位 px）。
+ *
+ * @napi-rs/canvas 的 actualBoundingBox* 在多字体回退的混排字符串上只反映
+ * **首个字体 run**：如「BOT 功能使用指南」的 actualBoundingBoxAscent/Descent
+ * 报的是 "BOT"（Sora）的 65/3，其后由回退字体绘制的汉字（真实 74/11）被完全
+ * 忽略，推进宽度却仍是整串的。据此外推的行距会随字体与脚本混合方式而失真，
+ * 字体一变就可能压线。这里改为把实际字符串画到离屏画布上扫描像素，得到与
+ * 字体、脚本混合方式无关的墨迹上下沿。
+ */
+const measureInk = (text: string, font: string, size: number) => {
+  const probe = createCanvas(1, 1).getContext('2d');
+  probe.font = font;
+  const width = Math.max(1, Math.ceil(probe.measureText(text).width) + 2);
+  const pad = Math.ceil(px(size) * 1.5);
+  const height = pad + Math.ceil(px(size) * 2);
+  const canvas = createCanvas(width, height);
+  const g = canvas.getContext('2d');
+  g.font = font;
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = '#ffffff';
+  g.fillText(text, 1, pad);
+  const data = g.getImageData(0, 0, width, height).data;
+  let top = -1;
+  let bottom = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] > 8) {
+        if (top < 0) top = y;
+        bottom = y;
+        break;
+      }
+    }
+  }
+  if (top < 0) return { ascent: 0, descent: 0 };
+  return { ascent: pad - top, descent: bottom - pad };
+};
+
+/**
+ * 推导头部基线与表格上缘：标题基线按行盒顶对齐页面上缘（fontBoundingBoxAscent
+ * 与字体运行无关，可稳定锚定），标题墨迹底、副标题墨迹顶/底则取 measureInk 的
+ * 真实墨迹，使 SUBTITLE_GAP 在任何字体上都成立。副标题一行由字标与说明文字
+ * 两段不同字体拼成，墨迹取两者的外沿。表格上缘取「副标题墨迹底 + HEADER_GAP」
+ * 与「字标下缘 + LOGO_GAP」中的较大者。在独立画布上度量，供 computeLayout
+ * 在建画布前使用。
  */
 const measureHeader = (fontPath?: string) => {
+  const titleFont = fontOf('title', TITLE_SIZE, fontPath);
+  const brandFont = fontOf('brand', SUBTITLE_SIZE, fontPath);
+  const subtitleFont = fontOf('subtitle', SUBTITLE_SIZE, fontPath);
   const scratch = createCanvas(1, 1).getContext('2d');
-  scratch.font = fontOf('title', TITLE_SIZE, fontPath);
+  scratch.font = titleFont;
   const title = scratch.measureText(TITLE_TEXT);
-  scratch.font = fontOf('subtitle', SUBTITLE_SIZE, fontPath);
-  const subtitle = scratch.measureText(SUBTITLE_TEXT);
+
+  const titleInk = measureInk(TITLE_TEXT, titleFont, TITLE_SIZE);
+  const brandInk = measureInk(SUBTITLE_BRAND, brandFont, SUBTITLE_SIZE);
+  const textInk = measureInk(SUBTITLE_TEXT, subtitleFont, SUBTITLE_SIZE);
+  const subtitleInk = {
+    ascent: Math.max(brandInk.ascent, textInk.ascent),
+    descent: Math.max(brandInk.descent, textInk.descent)
+  };
+
   const titleBaseline = MARGIN + title.fontBoundingBoxAscent / SCALE;
-  const titleInkBottom = titleBaseline + title.actualBoundingBoxDescent / SCALE;
-  const subtitleBaseline = titleInkBottom + SUBTITLE_GAP + subtitle.actualBoundingBoxAscent / SCALE;
-  const subtitleInkBottom = subtitleBaseline + subtitle.actualBoundingBoxDescent / SCALE;
+  const titleInkBottom = titleBaseline + titleInk.descent / SCALE;
+  const subtitleBaseline = titleInkBottom + SUBTITLE_GAP + subtitleInk.ascent / SCALE;
+  const subtitleInkBottom = subtitleBaseline + subtitleInk.descent / SCALE;
   const tableTop = Math.max(
     subtitleInkBottom + HEADER_GAP,
     LOGO_RECT.top + LOGO_RECT.height + LOGO_GAP
