@@ -9,11 +9,10 @@
  * 编号仅出现在机厅圆徽上，与文本列表一一对应；标签只承载名称/线路/在勤人数。
  */
 
-import { readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { createCanvas, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
+import { createCanvas, type SKRSContext2D } from '@napi-rs/canvas';
 import type { DiscoverResponse, MetroLineBadge } from '../types';
 import { radiusTravelTime } from '../utils';
+import { cssFont, ensureFont, FALLBACK_FAMILY, type FontSpec } from '../font';
 import { TILE_SIZE, lngToWorldX, latToWorldY, metersPerPixel } from './geo';
 import { stitchBasemap } from './basemap';
 import { isMvtTemplate, stitchVectorBasemap } from './vector';
@@ -33,12 +32,7 @@ const AMAP_MAX_ZOOM = 18;
 /** 高德亮色瓦片的暗色化滤镜（近似 amap://styles/dark 的观感） */
 export const AMAP_DARK_FILTER = 'invert(0.95) hue-rotate(180deg) saturate(0.35) brightness(0.95)';
 
-const DEFAULT_FONT_FAMILY =
-  '"Sora", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans CN", "Source Han Sans SC", "Noto Sans SC", sans-serif';
-
-/** 打包内置的 Sora 字体（与 nearcade.cn 一致），启动时静默注册 */
-const VENDOR_FONT_DIR = join(__dirname, '..', 'assets', 'fonts');
-const CUSTOM_FONT_ALIAS = 'nearcade-map';
+const DEFAULT_FONT_FAMILY = FALLBACK_FAMILY;
 
 /** 单个地区的底图配置 */
 export interface RegionBasemap {
@@ -103,45 +97,6 @@ const ACCENT = '#38bdf8';
 const INK = '#f1f5f9';
 const SUBTLE = '#94a3b8';
 const SHADOW = 'rgba(0, 0, 0, 0.5)';
-
-let fontRegistered = false;
-export function ensureFont(path?: string) {
-  if (fontRegistered) return;
-  const registerFile = (file: string, alias?: string) => {
-    try {
-      if (alias) GlobalFonts.registerFromPath(file, alias);
-      else GlobalFonts.registerFromPath(file);
-    } catch {
-      // 字体注册失败时回退到系统字体
-    }
-  };
-  try {
-    for (const entry of readdirSync(VENDOR_FONT_DIR)) {
-      if (/\.(ttf|otf|woff2?)$/i.test(entry)) registerFile(join(VENDOR_FONT_DIR, entry));
-    }
-  } catch {
-    // 内置字体缺失（非打包运行）时忽略
-  }
-  if (path) {
-    for (const part of path.split(';')) {
-      const target = part.trim();
-      if (!target) continue;
-      try {
-        if (statSync(target).isDirectory()) {
-          for (const entry of readdirSync(target)) {
-            if (/\.(ttf|otf|woff2?)$/i.test(entry))
-              registerFile(join(target, entry), CUSTOM_FONT_ALIAS);
-          }
-        } else {
-          registerFile(target, CUSTOM_FONT_ALIAS);
-        }
-      } catch {
-        // 路径无效时忽略
-      }
-    }
-  }
-  fontRegistered = true;
-}
 
 function roundRectPath(ctx: SKRSContext2D, x: number, y: number, w: number, h: number, r: number) {
   const rr = Math.max(0, Math.min(r, w / 2, h / 2));
@@ -257,8 +212,9 @@ export async function renderDiscoverMap(
         : '#e9edf0';
 
   ensureFont(fontPath);
-  const familyStack = fontPath ? `"${CUSTOM_FONT_ALIAS}", ${fontFamily}` : fontFamily;
-  const font = (weight: number | string, size: number) => `${weight} ${size}px ${familyStack}`;
+  // 与帮助图片共用 cssFont：族优先级与字重解析保持一致
+  const fontSpec: FontSpec = { family: fontFamily, fontPath };
+  const font = (weight: number | string, size: number) => cssFont(weight, size, fontSpec);
 
   // ------------------------------------------------------------------
   // 数据准备
