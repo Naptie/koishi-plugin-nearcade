@@ -16,6 +16,7 @@ import zhCN from '../locales/zh-CN.yml';
 import { compressDiscoverUrl, DISCOVER_RADIUS_OPTIONS, radiusTravelTime } from './utils';
 import { renderDiscoverMap } from './map/render';
 import { collectHelpRows, renderHelpCard } from './help';
+import { hasCjkGlyphs, ensureFont } from './font';
 
 type StoredArcadeRow = Arcade;
 
@@ -1767,7 +1768,18 @@ export const apply = (ctx: Context) => {
   // 与具体消息无关；渲染失败时保持 undefined，回退到远程图片
   const prefixes = ctx.app.config.prefix;
   const instancePrefix = (Array.isArray(prefixes) ? prefixes[0] : prefixes) ?? '';
-  renderHelpCard(collectHelpRows(ctx, instancePrefix), ctx.config.discoverMap?.fontPath)
+  // 先注册 fontPath 提供的字体，再做中文字形探测，避免误报
+  const fontPath = ctx.config.discoverMap?.fontPath;
+  ensureFont(fontPath);
+  // 缺中文字体时图片会静默变成方块或空白，这里明确告警一次，便于定位
+  if (!hasCjkGlyphs())
+    ctx
+      .logger('nearcade')
+      .warn(
+        '未检测到中文字体，帮助图片与地图中的汉字会显示为方块或空白。' +
+          '请安装中文字体（如 fonts-noto-cjk），或配置 discoverMap.fontPath 后重启。'
+      );
+  renderHelpCard(collectHelpRows(ctx, instancePrefix), fontPath)
     .then((image) => {
       helpImage = image;
     })

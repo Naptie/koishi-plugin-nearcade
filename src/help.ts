@@ -17,8 +17,9 @@
  * - 自然语言行（不经过指令系统）：本文件 NATURAL_ROWS，{…} 标记浅绿部分；
  * - 行序由 ROW_ORDER 决定，未登记的指令会告警并追加到末尾。
  *
- * 字体不随插件分发：优先使用系统安装的 Glow Sans（未来荧黑，按标准字体目录
- * 自动注册），缺失时回退系统 CJK 字体；主机缺少中文字体时可用
+ * 字体与地图渲染共用 src/font.ts 的 cssFont：字重以数字给出，族优先级统一。
+ * 优先使用系统安装的 Glow Sans（未来荧黑，按标准字体目录自动注册），缺失时
+ * 由 Skia 在系统 CJK 字体上合成同等粗细；主机缺少中文字体时可用
  * discoverMap.fontPath 提供字体文件（与地图渲染共用）。
  */
 
@@ -26,7 +27,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCanvas, GlobalFonts, loadImage, type SKRSContext2D } from '@napi-rs/canvas';
 import type { Context } from 'koishi';
-import { ensureFont } from './map/render';
+import { cssFont, ensureFont } from './font';
 
 // ---------------------------------------------------------------------------
 // 版式设计变量（单位 pt，渲染时乘以 SCALE 转像素）
@@ -84,16 +85,31 @@ const TEXT_SHADOW = {
   offsetY: 2 * Math.SQRT1_2
 } as const;
 
-const SYSTEM_FALLBACK =
-  '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans CN", "Source Han Sans SC", "Noto Sans SC", "nearcade-map", sans-serif';
+/**
+ * 字体族与字重。与地图渲染共用 cssFont：字重以数字给出，Glow Sans 缺失时
+ * 由 Skia 在回退字体上合成同等的粗细，两张图表现一致。
+ * Glow Sans 以「字宽 + 字重」拆成不同族名，仅在本机安装时命中。
+ */
+const GLOW_EXTENDED_HEAVY = '"Glow Sans SC Extended Heavy", "未来荧黑 Extended Heavy"';
+const GLOW_EXTENDED_MEDIUM = '"Glow Sans SC Extended Medium", "未来荧黑 Extended Medium"';
+const GLOW_EXTENDED_EXTRA_BOLD =
+  '"Glow Sans SC Extended ExtraBold", "未来荧黑 Extended ExtraBold"';
+const GLOW_NORMAL_MEDIUM = '"Glow Sans SC Normal Medium", "未来荧黑 Normal Medium"';
 
-const FONT_TITLE =
-  '"Glow Sans SC Extended Heavy", "未来荧黑 Extended Heavy", "Sora", ' + SYSTEM_FALLBACK;
-const FONT_EXT_MEDIUM =
-  '"Glow Sans SC Extended Medium", "未来荧黑 Extended Medium", ' + SYSTEM_FALLBACK;
-const FONT_HEADER =
-  '"Glow Sans SC Extended ExtraBold", "未来荧黑 Extended ExtraBold", ' + SYSTEM_FALLBACK;
-const FONT_BODY = '"Glow Sans SC Normal Medium", "未来荧黑 Normal Medium", ' + SYSTEM_FALLBACK;
+/** 各处文本的字重与展示字体族 */
+const FONT = {
+  title: { weight: 900, lead: GLOW_EXTENDED_HEAVY },
+  subtitle: { weight: 500, lead: GLOW_EXTENDED_MEDIUM },
+  brand: { weight: 600, lead: '"Sora"' },
+  header: { weight: 800, lead: GLOW_EXTENDED_EXTRA_BOLD },
+  body: { weight: 500, lead: GLOW_NORMAL_MEDIUM }
+} as const;
+
+type FontRole = keyof typeof FONT;
+
+/** 按角色拼出完整字体串（字号单位 pt，内部按 SCALE 换算为像素） */
+const fontOf = (role: FontRole, size: number, fontPath?: string) =>
+  cssFont(FONT[role].weight, px(size), { lead: FONT[role].lead, fontPath });
 
 // ---------------------------------------------------------------------------
 // 内容来源
@@ -308,21 +324,71 @@ const SUBTITLE_BRAND = 'nearcade';
 const SUBTITLE_TEXT = ' 官方 QQ 交流群: 1047949663';
 
 /**
- * 用墨迹度量（actualBoundingBox*，而非随字体胀缩的行盒度量）推导头部基线与
- * 表格上缘：标题基线按行盒顶对齐页面上缘，副标题墨迹顶距标题墨迹底
- * SUBTITLE_GAP，表格上缘取「副标题墨迹底 + HEADER_GAP」与「字标下缘 +
- * LOGO_GAP」中的较大者。在独立画布上度量，供 computeLayout 在建画布前使用。
+ * 光栅化扫描真实墨迹范围（相对基线，单位 px）。
+ *
+ * @napi-rs/canvas 的 actualBoundingBox* 在多字体回退的混排字符串上只反映
+ * **首个字体 run**：如「BOT 功能使用指南」的 actualBoundingBoxAscent/Descent
+ * 报的是 "BOT"（Sora）的 65/3，其后由回退字体绘制的汉字（真实 74/11）被完全
+ * 忽略，推进宽度却仍是整串的。据此外推的行距会随字体与脚本混合方式而失真，
+ * 字体一变就可能压线。这里改为把实际字符串画到离屏画布上扫描像素，得到与
+ * 字体、脚本混合方式无关的墨迹上下沿。
  */
-const measureHeader = () => {
+const measureInk = (text: string, font: string, size: number) => {
+  const probe = createCanvas(1, 1).getContext('2d');
+  probe.font = font;
+  const width = Math.max(1, Math.ceil(probe.measureText(text).width) + 2);
+  const pad = Math.ceil(px(size) * 1.5);
+  const height = pad + Math.ceil(px(size) * 2);
+  const canvas = createCanvas(width, height);
+  const g = canvas.getContext('2d');
+  g.font = font;
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = '#ffffff';
+  g.fillText(text, 1, pad);
+  const data = g.getImageData(0, 0, width, height).data;
+  let top = -1;
+  let bottom = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3] > 8) {
+        if (top < 0) top = y;
+        bottom = y;
+        break;
+      }
+    }
+  }
+  if (top < 0) return { ascent: 0, descent: 0 };
+  return { ascent: pad - top, descent: bottom - pad };
+};
+
+/**
+ * 推导头部基线与表格上缘：标题基线按行盒顶对齐页面上缘（fontBoundingBoxAscent
+ * 与字体运行无关，可稳定锚定），标题墨迹底、副标题墨迹顶/底则取 measureInk 的
+ * 真实墨迹，使 SUBTITLE_GAP 在任何字体上都成立。副标题一行由字标与说明文字
+ * 两段不同字体拼成，墨迹取两者的外沿。表格上缘取「副标题墨迹底 + HEADER_GAP」
+ * 与「字标下缘 + LOGO_GAP」中的较大者。在独立画布上度量，供 computeLayout
+ * 在建画布前使用。
+ */
+const measureHeader = (fontPath?: string) => {
+  const titleFont = fontOf('title', TITLE_SIZE, fontPath);
+  const brandFont = fontOf('brand', SUBTITLE_SIZE, fontPath);
+  const subtitleFont = fontOf('subtitle', SUBTITLE_SIZE, fontPath);
   const scratch = createCanvas(1, 1).getContext('2d');
-  scratch.font = `${px(TITLE_SIZE)}px ${FONT_TITLE}`;
+  scratch.font = titleFont;
   const title = scratch.measureText(TITLE_TEXT);
-  scratch.font = `${px(SUBTITLE_SIZE)}px ${FONT_EXT_MEDIUM}`;
-  const subtitle = scratch.measureText(SUBTITLE_TEXT);
+
+  const titleInk = measureInk(TITLE_TEXT, titleFont, TITLE_SIZE);
+  const brandInk = measureInk(SUBTITLE_BRAND, brandFont, SUBTITLE_SIZE);
+  const textInk = measureInk(SUBTITLE_TEXT, subtitleFont, SUBTITLE_SIZE);
+  const subtitleInk = {
+    ascent: Math.max(brandInk.ascent, textInk.ascent),
+    descent: Math.max(brandInk.descent, textInk.descent)
+  };
+
   const titleBaseline = MARGIN + title.fontBoundingBoxAscent / SCALE;
-  const titleInkBottom = titleBaseline + title.actualBoundingBoxDescent / SCALE;
-  const subtitleBaseline = titleInkBottom + SUBTITLE_GAP + subtitle.actualBoundingBoxAscent / SCALE;
-  const subtitleInkBottom = subtitleBaseline + subtitle.actualBoundingBoxDescent / SCALE;
+  const titleInkBottom = titleBaseline + titleInk.descent / SCALE;
+  const subtitleBaseline = titleInkBottom + SUBTITLE_GAP + subtitleInk.ascent / SCALE;
+  const subtitleInkBottom = subtitleBaseline + subtitleInk.descent / SCALE;
   const tableTop = Math.max(
     subtitleInkBottom + HEADER_GAP,
     LOGO_RECT.top + LOGO_RECT.height + LOGO_GAP
@@ -331,8 +397,8 @@ const measureHeader = () => {
 };
 
 /** 按行数推导版式：行高恒定，页面高度随表格内容收缩或增长 */
-const computeLayout = (rowCount: number): HelpLayout => {
-  const header = measureHeader();
+const computeLayout = (rowCount: number, fontPath?: string): HelpLayout => {
+  const header = measureHeader(fontPath);
   const headerHeight = HEADER_SIZE * HEADER_LINE;
   const tableHeight = headerHeight + rowCount * ROW_HEIGHT;
   const pageHeight = Math.ceil((header.tableTop + tableHeight + BOTTOM_MARGIN) * 2) / 2;
@@ -350,10 +416,9 @@ const drawSegments = (
   segments: Segment[],
   x: number,
   baseline: number,
-  font: string,
-  size: number
+  font: string
 ) => {
-  g.font = `${px(size)}px ${font}`;
+  g.font = font;
   let cursor = x;
   g.save();
   g.shadowColor = TEXT_SHADOW.color;
@@ -422,26 +487,32 @@ const drawLogo = async (g: SKRSContext2D) => {
 };
 
 /** 顶部标题与副标题（右对齐，与表格右缘对齐；基线来自 measureHeader 的墨迹度量） */
-const drawHeader = (g: SKRSContext2D, layout: HelpLayout) => {
+const drawHeader = (g: SKRSContext2D, layout: HelpLayout, fontPath?: string) => {
   const right = px(PAGE_WIDTH - MARGIN - PAD_X);
 
-  g.font = `${px(TITLE_SIZE)}px ${FONT_TITLE}`;
+  g.font = fontOf('title', TITLE_SIZE, fontPath);
   g.fillStyle = COLOR.white;
   const titleWidth = g.measureText(TITLE_TEXT).width;
   g.fillText(TITLE_TEXT, right - titleWidth, px(layout.titleBaseline));
 
-  g.font = `${px(SUBTITLE_SIZE)}px ${FONT_EXT_MEDIUM}`;
+  const subtitleFont = fontOf('subtitle', SUBTITLE_SIZE, fontPath);
+  g.font = subtitleFont;
   const textWidth = g.measureText(SUBTITLE_TEXT).width;
   const subtitleBaseline = px(layout.subtitleBaseline);
-  g.font = `600 ${px(SUBTITLE_SIZE)}px "Sora", ${FONT_EXT_MEDIUM}`;
+  g.font = fontOf('brand', SUBTITLE_SIZE, fontPath);
   const brandWidth = g.measureText(SUBTITLE_BRAND).width;
   const subtitleLeft = right - brandWidth - textWidth;
   g.fillText(SUBTITLE_BRAND, subtitleLeft, subtitleBaseline);
-  g.font = `${px(SUBTITLE_SIZE)}px ${FONT_EXT_MEDIUM}`;
+  g.font = subtitleFont;
   g.fillText(SUBTITLE_TEXT, subtitleLeft + brandWidth, subtitleBaseline);
 };
 
-const drawTable = (g: SKRSContext2D, rows: HelpCardRow[], layout: HelpLayout) => {
+const drawTable = (
+  g: SKRSContext2D,
+  rows: HelpCardRow[],
+  layout: HelpLayout,
+  fontPath?: string
+) => {
   const left = px(MARGIN);
   const top = px(layout.tableTop);
   const width = px(PAGE_WIDTH - MARGIN * 2);
@@ -467,68 +538,47 @@ const drawTable = (g: SKRSContext2D, rows: HelpCardRow[], layout: HelpLayout) =>
   }
 
   // 行内文本按墨迹垂直居中（用不含降部的 CJK 探针串度量墨迹盒）
-  const cellBaseline = (rowTop: number, rowH: number, font: string, size: number) => {
-    g.font = `${px(size)}px ${font}`;
+  const cellBaseline = (rowTop: number, rowH: number, font: string) => {
+    g.font = font;
     const metrics = g.measureText('机厅名');
     return rowTop + (rowH + metrics.actualBoundingBoxAscent - metrics.actualBoundingBoxDescent) / 2;
   };
 
+  const headerFont = fontOf('header', HEADER_SIZE, fontPath);
+  const bodyFont = fontOf('body', BODY_SIZE, fontPath);
+
   // 表头
-  const headerBaseline = cellBaseline(top, headerHeight, FONT_HEADER, HEADER_SIZE);
-  drawSegments(
-    g,
-    [{ text: '功能', color: 'white' }],
-    left + columnOffsets[0] + PAD_X * SCALE,
-    headerBaseline,
-    FONT_HEADER,
-    HEADER_SIZE
-  );
+  const headerBaseline = cellBaseline(top, headerHeight, headerFont);
+  drawSegments(g, [{ text: '功能', color: 'white' }], left + columnOffsets[0] + PAD_X * SCALE, headerBaseline, headerFont);
   drawSegments(
     g,
     [{ text: '指令格式', color: 'white' }],
     left + columnOffsets[1] + PAD_X * SCALE,
     headerBaseline,
-    FONT_HEADER,
-    HEADER_SIZE
+    headerFont
   );
   drawSegments(
     g,
     [{ text: '示例', color: 'white' }],
     left + columnOffsets[2] + PAD_X * SCALE,
     headerBaseline,
-    FONT_HEADER,
-    HEADER_SIZE
+    headerFont
   );
 
   // 数据行
   for (const [index, row] of rows.entries()) {
     const rowTop = top + headerHeight + index * rowHeight;
-    const baseline = cellBaseline(rowTop, rowHeight, FONT_BODY, BODY_SIZE);
+    const baseline = cellBaseline(rowTop, rowHeight, bodyFont);
     drawSegments(
       g,
       [{ text: row.label, color: 'white' }],
       left + columnOffsets[0] + PAD_X * SCALE,
       baseline,
-      FONT_BODY,
-      BODY_SIZE
+      bodyFont
     );
-    drawSegments(
-      g,
-      row.syntax,
-      left + columnOffsets[1] + PAD_X * SCALE,
-      baseline,
-      FONT_BODY,
-      BODY_SIZE
-    );
+    drawSegments(g, row.syntax, left + columnOffsets[1] + PAD_X * SCALE, baseline, bodyFont);
     if (row.example) {
-      drawSegments(
-        g,
-        row.example,
-        left + columnOffsets[2] + PAD_X * SCALE,
-        baseline,
-        FONT_BODY,
-        BODY_SIZE
-      );
+      drawSegments(g, row.example, left + columnOffsets[2] + PAD_X * SCALE, baseline, bodyFont);
     }
   }
 };
@@ -537,14 +587,14 @@ const drawTable = (g: SKRSContext2D, rows: HelpCardRow[], layout: HelpLayout) =>
 export const renderHelpCard = async (rows: HelpCardRow[], fontPath?: string): Promise<Buffer> => {
   ensureFont(fontPath);
   registerSystemFonts();
-  const layout = computeLayout(rows.length);
+  const layout = computeLayout(rows.length, fontPath);
   const canvas = createCanvas(px(PAGE_WIDTH), px(layout.pageHeight));
   const g = canvas.getContext('2d');
   g.textBaseline = 'alphabetic';
   await drawBackground(g, layout.pageHeight);
   await drawBackdrop(g, layout);
   await drawLogo(g);
-  drawTable(g, rows, layout);
-  drawHeader(g, layout);
+  drawTable(g, rows, layout, fontPath);
+  drawHeader(g, layout, fontPath);
   return canvas.encode('png');
 };
