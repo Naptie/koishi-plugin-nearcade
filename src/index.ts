@@ -863,8 +863,8 @@ export const apply = (ctx: Context) => {
               if (image) {
                 await session.send(
                   session.messageId
-                    ? [h.quote(session.messageId), h.image(image, 'image/png')]
-                    : h.image(image, 'image/png')
+                    ? [h.quote(session.messageId), h.image(image, 'image/webp')]
+                    : h.image(image, 'image/webp')
                 );
               }
             }

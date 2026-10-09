@@ -1099,5 +1099,5 @@ export async function renderDiscoverMap(
   fillTextCentered(ctx, scaleBar.label, barX0, barY - 7);
   ctx.restore();
 
-  return canvas.encode('png');
+  return canvas.encode('webp', 85);
 }
