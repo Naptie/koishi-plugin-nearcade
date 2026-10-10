@@ -17,7 +17,6 @@ import { TILE_SIZE, lngToWorldX, latToWorldY, metersPerPixel } from './geo';
 import { stitchBasemap } from './basemap';
 import { isMvtTemplate, stitchVectorBasemap } from './vector';
 import {
-  edgePoint,
   findPlacement,
   nudgeOverlaps,
   type Anchor,
@@ -107,6 +106,34 @@ function roundRectPath(ctx: SKRSContext2D, x: number, y: number, w: number, h: n
   ctx.arcTo(x, y + h, x, y, rr);
   ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
+}
+
+/** Find where the line from a marker enters the rounded pill outline. */
+function roundedRectEdgePoint(rect: Rect, point: { x: number; y: number }) {
+  const radius = Math.min(rect.h / 2, rect.w / 2);
+  const center = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+  const contains = (candidate: { x: number; y: number }) => {
+    const nearestX = Math.max(rect.x + radius, Math.min(candidate.x, rect.x + rect.w - radius));
+    const nearestY = Math.max(rect.y + radius, Math.min(candidate.y, rect.y + rect.h - radius));
+    return (candidate.x - nearestX) ** 2 + (candidate.y - nearestY) ** 2 <= radius ** 2;
+  };
+
+  if (contains(point)) return point;
+  let outside = 0;
+  let inside = 1;
+  for (let i = 0; i < 32; i++) {
+    const t = (outside + inside) / 2;
+    const candidate = {
+      x: point.x + (center.x - point.x) * t,
+      y: point.y + (center.y - point.y) * t
+    };
+    if (contains(candidate)) inside = t;
+    else outside = t;
+  }
+  return {
+    x: point.x + (center.x - point.x) * inside,
+    y: point.y + (center.y - point.y) * inside
+  };
 }
 
 /** 以 ink 包围盒垂直居中绘制文本（CJK 与拉丁混排时依然视觉居中） */
@@ -461,14 +488,31 @@ export async function renderDiscoverMap(
       .filter((s): s is MapStation => !!s)
       .map((s) => project(s.lng, s.lat));
 
+  // 机厅编号徽标保留区：过近时确定性微移；紧贴原点十字标的
+  // 徽标沿径向推开，避免被十字标遮挡
+  const markerPts = shops.map((s) => project(s.lng, s.lat));
+  nudgeOverlaps(markerPts, 24);
+  for (const pt of markerPts) {
+    const dist = Math.hypot(pt.x - originPt.x, pt.y - originPt.y);
+    if (dist < 18) {
+      if (dist < 0.01) {
+        pt.x += 18;
+      } else {
+        pt.x = originPt.x + ((pt.x - originPt.x) / dist) * 18;
+        pt.y = originPt.y + ((pt.y - originPt.y) / dist) * 18;
+      }
+    }
+  }
+
   // 站 → 机厅 步行虚线（最底层）
   if (walkLines && metro) {
     ctx.save();
     ctx.globalAlpha = 0.75;
-    for (const shop of shops) {
+    for (const [i, shop] of shops.entries()) {
       const station = shop.stationId ? stations.get(shop.stationId) : null;
       if (!station) continue;
-      const pts = [project(station.lng, station.lat), project(shop.lng, shop.lat)];
+      // Match the final marker position after overlap avoidance nudges it.
+      const pts = [project(station.lng, station.lat), markerPts[i]];
       strokePolyline(pts, () => {
         ctx.strokeStyle = '#94a3b8';
         ctx.lineWidth = 1.4;
@@ -542,22 +586,6 @@ export async function renderDiscoverMap(
     ctx.lineWidth = interchange ? 2.4 : 1.8;
     ctx.stroke();
     ctx.restore();
-  }
-
-  // 机厅标记（编号圆徽），过近时确定性微移；紧贴原点十字标的
-  // 徽标沿径向推开，避免被十字标遮挡
-  const markerPts = shops.map((s) => project(s.lng, s.lat));
-  nudgeOverlaps(markerPts, 24);
-  for (const pt of markerPts) {
-    const dist = Math.hypot(pt.x - originPt.x, pt.y - originPt.y);
-    if (dist < 18) {
-      if (dist < 0.01) {
-        pt.x += 18;
-      } else {
-        pt.x = originPt.x + ((pt.x - originPt.x) / dist) * 18;
-        pt.y = originPt.y + ((pt.y - originPt.y) / dist) * 18;
-      }
-    }
   }
 
   // ------------------------------------------------------------------
@@ -688,10 +716,13 @@ export async function renderDiscoverMap(
   const withConnector = (
     pt: { x: number; y: number },
     placement: { rect: Rect; leader: LabelPlacement['leader'] }
-  ): LabelPlacement => ({
-    rect: placement.rect,
-    leader: placement.leader ?? { from: pt, to: edgePoint(placement.rect, pt) }
-  });
+  ): LabelPlacement => {
+    const from = placement.leader?.from ?? pt;
+    return {
+      rect: placement.rect,
+      leader: { from, to: roundedRectEdgePoint(placement.rect, from) }
+    };
+  };
 
   // 站点标签（先放置，作为机厅标签的参照物）
   const stationOrder = [...stations.values()].sort((a, b) => {
