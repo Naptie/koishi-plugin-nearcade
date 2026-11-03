@@ -10,9 +10,11 @@ import {
   DiscoverySettings,
   Game,
   GeocodeResponse,
+  GroupLink,
   GroupSettings,
   Shop
 } from './types';
+import { CoordinationConfig, createCoordinator } from './coordination';
 import zhCN from '../locales/zh-CN.yml';
 import { compressDiscoverUrl, DISCOVER_RADIUS_OPTIONS, radiusTravelTime } from './utils';
 import { renderDiscoverMap } from './map/render';
@@ -28,6 +30,7 @@ declare module 'koishi' {
     customAttendanceReports: CustomAttendanceReport;
     discoverySettings: DiscoverySettings;
     groupSettings: GroupSettings;
+    groupLinks: GroupLink;
   }
 }
 
@@ -55,6 +58,7 @@ export interface Config {
   helpOnMention?: boolean;
   customShops?: CustomShop[];
   discoverMap?: DiscoverMapConfig;
+  coordination?: CoordinationConfig;
 }
 export const Config: Schema<Config> = Schema.object({
   urlBase: Schema.string()
@@ -106,7 +110,25 @@ export const Config: Schema<Config> = Schema.object({
     fontPath: Schema.string().description(
       '系统缺少中文字体时，填写中文字体文件或其所在目录的路径（多个用 ; 分隔）'
     )
-  }).description('发现结果地图')
+  }).description('发现结果地图'),
+  coordination: Schema.object({
+    enabled: Schema.boolean().default(true).description('是否启用多适配器群组协调'),
+    onebotSelfId: Schema.string().description('优先使用的 OneBot 机器人 selfId（留空自动选择）'),
+    qqSelfId: Schema.string().description('优先使用的 QQ 官方机器人 selfId（留空自动选择）'),
+    officialRobotUin: Schema.string().description(
+      'QQ 官方机器人的 QQ 号；留空时从官方接口返回的分享链接中自动解析'
+    ),
+    links: Schema.array(
+      Schema.object({
+        onebotGroupId: Schema.string().required().description('OneBot 群号'),
+        qqGroupOpenid: Schema.string().required().description('QQ 官方群 group_openid'),
+        onebotSelfId: Schema.string().description('OneBot 机器人 selfId'),
+        qqSelfId: Schema.string().description('QQ 官方机器人 selfId')
+      })
+    )
+      .default([])
+      .description('手动群组映射（仅在无法自动匹配时使用）')
+  }).description('多适配器群组协调')
 });
 
 const gameTitles: Array<{ titleId: number; names: string[] }> = [
@@ -398,7 +420,50 @@ export const apply = (ctx: Context) => {
     }
   );
 
+  ctx.model.extend(
+    'groupLinks',
+    {
+      _id: 'integer',
+      qqSelfId: 'string',
+      qqGroupOpenid: 'string',
+      onebotSelfId: 'string',
+      onebotGroupId: 'string',
+      source: 'string',
+      createdAt: 'string',
+      updatedAt: 'string'
+    },
+    {
+      primary: '_id',
+      autoInc: true
+    }
+  );
+
   ctx.i18n.define('zh-CN', zhCN);
+
+  const coordinator = createCoordinator(ctx, ctx.config.coordination ?? {});
+  void coordinator.start();
+
+  // 先于命令执行解析群组映射：OneBot 收到的消息需要在这里挂上官方发送通道，
+  // 官方机器人收到的重复会话则由命令守卫跳过 nearcade 命令。
+  ctx.middleware(async (session, next) => {
+    await coordinator.prepare(session);
+    return next();
+  }, true);
+
+  const isNearcadeCommand = (command: { name?: string; parent?: unknown } | undefined) => {
+    let current = command as { name?: string; parent?: unknown } | undefined;
+    while (current) {
+      if (current.name === 'nearcade') return true;
+      current = current.parent as typeof current;
+    }
+    return false;
+  };
+
+  ctx.before('command/execute', (argv) => {
+    if (!argv.session || !coordinator.shouldSuppress(argv.session)) return;
+    if (!isNearcadeCommand(argv.command)) return;
+    return '';
+  });
 
   const shopCache = new Map<number, Promise<Shop | undefined>>();
 
@@ -739,7 +804,7 @@ export const apply = (ctx: Context) => {
     let message = helpImage
       ? h.image(helpImage, 'image/png')
       : h('img', { src: `${urlBase}/bot-help.png` });
-    if (ctx.config.helpMessage && session?.platform !== 'qq') {
+    if (ctx.config.helpMessage && (!session || coordinator.getSendPlatform(session) !== 'qq')) {
       message = h('p', ctx.config.helpMessage, message);
     }
     return message;
@@ -749,25 +814,31 @@ export const apply = (ctx: Context) => {
     distance >= 1 ? `(${distance.toFixed(2)} 千米)` : `(${(distance * 1000).toFixed(0)} 米)`;
 
   const getSessionContext = (session?: Session) => ({
-    channelId: session?.channelId ?? `private:${session?.userId ?? 'unknown'}`,
+    channelId: session
+      ? coordinator.getChannelId(session) || `private:${session.userId ?? 'unknown'}`
+      : 'private:unknown',
     userId: session?.userId ?? 'unknown',
     username: session?.username ?? '未知用户',
     content: session?.content ?? ''
   });
 
   ctx.on('message', async (session) => {
+    const route = await coordinator.prepare(session);
+    if (route?.suppressNearcade) return;
+    const sendMessage = (target: Session, content: h.Fragment) => coordinator.send(target, content);
     const { channelId, content } = getSessionContext(session);
     const trimmedContent = content.trim();
     const lowerContent = trimmedContent.toLowerCase();
 
     // ── 位置消息 → 附近机厅探索 ──────────────────────────
-    const isOfficial = session.platform === 'qq';
+    const isOfficialReceive = session.platform === 'qq';
+    const sendOfficial = coordinator.getSendPlatform(session) === 'qq';
 
     let parsed:
       | { latitude: string; longitude: string; name: string }
       | { name: string; candidates: { address: string; name?: string }[] }
       | undefined;
-    if (isOfficial) {
+    if (isOfficialReceive) {
       const ark = (
         session.event._data as {
           d?: { ark_data?: { ark_type?: string; fields?: { address?: string; desc?: string } } };
@@ -838,7 +909,8 @@ export const apply = (ctx: Context) => {
           }
         }
         if (!geocoded) {
-          await session.send(
+          await sendMessage(
+            session,
             lastError
               ? `查询附近机厅失败：位置解析失败（${lastError}）`
               : '查询附近机厅失败：未能解析该位置的坐标。'
@@ -868,7 +940,12 @@ export const apply = (ctx: Context) => {
             };
           }
         ).onebot;
-        if (session.platform === 'onebot' && onebot?.setMsgEmojiLike && session.messageId) {
+        if (
+          session.platform === 'onebot' &&
+          !sendOfficial &&
+          onebot?.setMsgEmojiLike &&
+          session.messageId
+        ) {
           await onebot.setMsgEmojiLike(session.messageId, '124');
         }
       } catch (error) {
@@ -877,7 +954,7 @@ export const apply = (ctx: Context) => {
       const radius = settings?.radius || 10;
       const result = await client.discoverArcades(latitude, longitude, radius, name);
       if (typeof result === 'string') {
-        await session.send(`查询附近机厅失败：${result}`);
+        await sendMessage(session, `查询附近机厅失败：${result}`);
         return;
       }
       const mapConfig = ctx.config.discoverMap;
@@ -889,7 +966,7 @@ export const apply = (ctx: Context) => {
               basemaps: mapConfig?.basemaps,
               fontPath: mapConfig?.fontPath,
               walkLines: mapConfig?.walkLines,
-              format: isOfficial ? 'png' : 'webp'
+              format: sendOfficial ? 'png' : 'webp'
             }).catch((error) => {
               ctx.logger('nearcade').warn('渲染发现结果地图失败：', error);
               return null;
@@ -922,7 +999,7 @@ export const apply = (ctx: Context) => {
             : '');
 
         bodyLines.push(
-          isOfficial
+          sendOfficial
             ? `**${index + 1}.** [${escapeMarkdownLinkText(`「${shop.name}」`)}](${urlBase}/shops/${shop.id}) ${suffix}`
             : `${index + 1}.「${shop.name}」${suffix}`
         );
@@ -936,7 +1013,7 @@ export const apply = (ctx: Context) => {
       );
       const footer = `有关更多信息，请访问 ${discoverUrl}`;
 
-      if (isOfficial) {
+      if (sendOfficial) {
         const pages: string[][] = [];
         for (let i = 0; i < bodyLines.length; i += MARKDOWN_RESULTS_PER_PAGE) {
           pages.push(bodyLines.slice(i, i + MARKDOWN_RESULTS_PER_PAGE));
@@ -967,14 +1044,14 @@ export const apply = (ctx: Context) => {
             );
           }
           try {
-            const sent = await target.send([h('qq:markdown', message), ...buttons]);
+            const sent = await sendMessage(target, [h('qq:markdown', message), ...buttons]);
             if (sent.length) return;
           } catch (error) {
             ctx.logger('nearcade').warn('发送发现结果（含键盘）失败：', error);
           }
           // 键盘被拒时回退为纯 markdown；再失败只记录日志，避免交互回调抛错。
           try {
-            await target.send(h('qq:markdown', message));
+            await sendMessage(target, h('qq:markdown', message));
           } catch (error) {
             ctx.logger('nearcade').warn('发送发现结果失败：', error);
           }
@@ -982,16 +1059,22 @@ export const apply = (ctx: Context) => {
         await sendPage(session, 0);
       } else {
         const message = [buildHeader(bodyLines.length), ...bodyLines, footer].join('\n');
-        await session.send(result.shops.length > 3 ? toForwarded(message) : message);
+        await sendMessage(
+          session,
+          coordinator.canForward(session) && result.shops.length > 3
+            ? toForwarded(message)
+            : message
+        );
       }
 
       if (mapPromise) {
         const image = await mapPromise;
         if (image) {
-          await session.send(
-            !isOfficial && session.messageId
+          await sendMessage(
+            session,
+            !sendOfficial && session.messageId
               ? [h.quote(session.messageId), h.image(image, 'image/webp')]
-              : h.image(image, 'image/png')
+              : h.image(image, sendOfficial ? 'image/png' : 'image/webp')
           );
         }
       }
@@ -1005,7 +1088,7 @@ export const apply = (ctx: Context) => {
       return;
     }
     if (lowerContent === 'nearcade' && ctx.config.helpOnMention !== false) {
-      await session.send(getHelpMessage(session));
+      await sendMessage(session, getHelpMessage(session));
       return;
     }
     if (attendanceQuerySuffix.some((suffix) => lowerContent.endsWith(suffix))) {
@@ -1027,7 +1110,7 @@ export const apply = (ctx: Context) => {
             name: { value: query, mode: 'contains' }
           });
           if (typeof page === 'string') {
-            await session.send(`查询机厅失败：${page}`);
+            await sendMessage(session, `查询机厅失败：${page}`);
             return;
           }
           // 匹配数超过上限视为查询过于宽泛（如闲聊片段），保持静默；自定义
@@ -1126,7 +1209,10 @@ export const apply = (ctx: Context) => {
             })
           )
         ).join('\n');
-        await session.send(arcadeQuery.length > 5 ? toForwarded(message) : message);
+        await sendMessage(
+          session,
+          coordinator.canForward(session) && arcadeQuery.length > 5 ? toForwarded(message) : message
+        );
       }
       return;
     }
@@ -1257,13 +1343,14 @@ export const apply = (ctx: Context) => {
           name: { value: left, mode: 'contains' }
         });
         if (typeof page === 'string') {
-          await session.send(`查询机厅失败：${page}`);
+          await sendMessage(session, `查询机厅失败：${page}`);
           continue;
         }
         // 0 个匹配静默忽略；超过上限视为查询过于宽泛，同样静默。
         if (page.totalCount === 0 || page.totalCount > AUTOSEARCH_MAX_MATCHES) continue;
         if (page.shops.length > 1) {
-          await session.send(
+          await sendMessage(
+            session,
             '找到多个匹配的机厅，请使用更具体的名称或别名：\n' +
               page.shops.map((item) => `- ${item.name}`).join('\n')
           );
@@ -1271,7 +1358,10 @@ export const apply = (ctx: Context) => {
         }
         const defaultGame = getDefaultGame(page.shops[0]);
         if (!defaultGame) {
-          await session.send(`机厅「${page.shops[0].name}」未收录任何机台，无法上报在勤人数。`);
+          await sendMessage(
+            session,
+            `机厅「${page.shops[0].name}」未收录任何机台，无法上报在勤人数。`
+          );
           continue;
         }
         reportQueue.push({
@@ -1289,8 +1379,11 @@ export const apply = (ctx: Context) => {
         )
       )
     ).filter((msg) => msg);
-    await session.send(
-      messages.length > 5 ? toForwarded(messages.join('\n')) : messages.join('\n')
+    await sendMessage(
+      session,
+      coordinator.canForward(session) && messages.length > 5
+        ? toForwarded(messages.join('\n'))
+        : messages.join('\n')
     );
   });
 
@@ -1562,7 +1655,7 @@ export const apply = (ctx: Context) => {
           `查询到以下机厅（共 ${shops.length} 家）：\n` +
           shops.map((item, index) => `${index + 1}. ${item.name}`).join('\n') +
           '\n请输入对应的序号以绑定机厅，或发送“取消”以取消操作。序号后可附加数个空格间隔的机厅别名。';
-        const forward = shops.length > 5;
+        const forward = coordinator.canForward(session) && shops.length > 5;
         await session.send(forward ? toForwarded(message) : message);
         const reply = await session.prompt();
         if (!reply) return '回复超时，操作已取消。';
@@ -1583,11 +1676,12 @@ export const apply = (ctx: Context) => {
     .alias('查找机厅', '搜索机厅', '搜寻机厅', '寻找机厅', 'query', 'find')
     .example('城市英雄')
     .example('Tokyo')
-    .action(async (_, ...segments) => {
+    .action(async ({ session }, ...segments) => {
       const query = segments.join(' ');
       if (query.trim().length === 0) {
         return '查询字符串不得为空。';
       }
+      if (!session) return '会话不可用。';
       const result = await client.findArcades(query);
       if (typeof result === 'string') {
         return `请求失败：${result}`;
@@ -1605,7 +1699,7 @@ export const apply = (ctx: Context) => {
             return `${index + 1}. ${item.name} ${identifier}`;
           })
           .join('\n');
-      const forward = shops.length > 5;
+      const forward = coordinator.canForward(session) && shops.length > 5;
       return forward ? toForwarded(message) : message;
     });
 
@@ -1777,7 +1871,9 @@ export const apply = (ctx: Context) => {
           ? '\n' +
             `- 由 ${savedArcade.registrantName} (${savedArcade.registrantId}) 绑定于 ${new Date(savedArcade.registeredAt).toLocaleString()}`
           : '');
-      return shop.games.length > 1 ? toForwarded(message) : message;
+      return coordinator.canForward(session) && shop.games.length > 1
+        ? toForwarded(message)
+        : message;
     });
 
   ctx

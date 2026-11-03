@@ -606,3 +606,14 @@ export interface GroupSettings {
   operatorName: string;
   updatedAt: string;
 }
+
+export interface GroupLink {
+  _id: number;
+  qqSelfId: string;
+  qqGroupOpenid: string;
+  onebotSelfId: string;
+  onebotGroupId: string;
+  source: 'metadata' | 'observed' | 'manual';
+  createdAt: string;
+  updatedAt: string;
+}
