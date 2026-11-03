@@ -2,6 +2,7 @@ import {
   AttendanceReportResponse,
   AttendanceResponse,
   DiscoverResponse,
+  GeocodeResponse,
   ShopInfoResponse,
   ShopsListResponse
 } from './types';
@@ -46,12 +47,22 @@ export class Client {
     return response.json() as Promise<T>;
   }
 
-  async discoverArcades(latitude: string, longitude: string, radius: number, name: string) {
+  async discoverArcades(latitude: string, longitude: string, radius: number, name: string, limit?: number) {
     return this.request<DiscoverResponse>(
       `/discover?latitude=${latitude}&longitude=${longitude}&radius=${radius}${
-        name ? `&name=${encodeURIComponent(name)}` : ''
-      }`
+        limit ? `&limit=${limit}` : ''
+      }${name ? `&name=${encodeURIComponent(name)}` : ''}`
     );
+  }
+
+  /**
+   * 地址解析（nearcade 地理编码端点）：将地址或地点名解析为坐标。
+   */
+  async geocode(address: string, name?: string) {
+    return this.request<GeocodeResponse>('/geo/geocode', 'POST', {
+      address,
+      ...(name ? { name } : {})
+    });
   }
 
   async findArcades(query: string, limit: number = 0, max: number = 200) {

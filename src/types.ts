@@ -37,6 +37,26 @@ export interface AttendanceReportResponse {
   success: boolean;
 }
 
+/**
+ * `/api/geo/geocode`（nearcade 地理编码端点）的响应：将地址/地点名文本
+ * 解析为坐标。官方 API 的位置卡片不含坐标，经此解析后再查询附近机厅。
+ */
+export interface GeocodeResponse {
+  provider: string;
+  routingPolicy: string | null;
+  coordinateSystem: 'GCJ02' | 'WGS84';
+  results: Array<{
+    formattedAddress: string;
+    location: {
+      longitude: number;
+      latitude: number;
+      coordinateSystem: 'GCJ02' | 'WGS84';
+    };
+    accuracy?: string;
+    placeId?: string;
+  }>;
+}
+
 export interface DiscoverResponse {
   /**
    * 原点

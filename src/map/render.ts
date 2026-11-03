@@ -16,13 +16,7 @@ import { cssFont, ensureFont, FALLBACK_FAMILY, type FontSpec } from '../font';
 import { TILE_SIZE, lngToWorldX, latToWorldY, metersPerPixel } from './geo';
 import { stitchBasemap } from './basemap';
 import { isMvtTemplate, stitchVectorBasemap } from './vector';
-import {
-  findPlacement,
-  nudgeOverlaps,
-  type Anchor,
-  type Rect,
-  type ViewportBounds
-} from './place';
+import { findPlacement, nudgeOverlaps, type Anchor, type Rect, type ViewportBounds } from './place';
 
 const REF_ZOOM = 22;
 
@@ -63,6 +57,8 @@ export interface MapRenderOptions {
   maxLabelChars?: number;
   /** 是否绘制地铁站 → 机厅的步行虚线 */
   walkLines?: boolean;
+  /** 输出格式：webp（默认，体积小）或 png（QQ 官方 API 的富媒体上传仅承诺 png/jpg） */
+  format?: 'webp' | 'png';
 }
 
 interface MapShop {
@@ -200,7 +196,8 @@ export async function renderDiscoverMap(
     fontPath,
     fontFamily = DEFAULT_FONT_FAMILY,
     maxLabelChars = 40,
-    walkLines = true
+    walkLines = true,
+    format = 'webp'
   } = options;
 
   // 以机厅行政区划（region 首元素）的国家/地区代码解析底图配置：
@@ -1130,5 +1127,5 @@ export async function renderDiscoverMap(
   fillTextCentered(ctx, scaleBar.label, barX0, barY - 7);
   ctx.restore();
 
-  return canvas.encode('webp', 85);
+  return format === 'png' ? canvas.encode('png') : canvas.encode('webp', 85);
 }

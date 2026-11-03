@@ -9,6 +9,7 @@ import {
   CustomShop,
   DiscoverySettings,
   Game,
+  GeocodeResponse,
   GroupSettings,
   Shop
 } from './types';
@@ -167,6 +168,9 @@ export const isSearchableQuery = (query: string) => {
 // 的命中仍会回复列表供用户消歧。
 const AUTOSEARCH_MAX_MATCHES = 10;
 
+// 官方机器人无法发送聊天记录（forward），发现结果改以 markdown 分页呈现。
+const MARKDOWN_RESULTS_PER_PAGE = 5;
+
 const decodeHtmlEntities = (str: string) =>
   str
     .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
@@ -181,6 +185,9 @@ const tryParseCqJson = (text: string) => {
   const decoded = decodeHtmlEntities(m[1]);
   return { type: 'json', data: { data: decoded } };
 };
+
+// markdown 链接文本里的方括号与反斜杠需转义，否则会破坏 [文本](链接) 结构
+const escapeMarkdownLinkText = (text: string) => text.replace(/[[\]\\]/g, '\\$&');
 
 const SHOP_ID_OFFSET_BEMANICN = 10000;
 const SHOP_ID_OFFSET_ZIV = 20000;
@@ -728,11 +735,11 @@ export const apply = (ctx: Context) => {
   // 无关）；未完成或失败时回退到远程图片
   let helpImage: Buffer | undefined;
 
-  const getHelpMessage = () => {
+  const getHelpMessage = (session?: Session) => {
     let message = helpImage
       ? h.image(helpImage, 'image/png')
       : h('img', { src: `${urlBase}/bot-help.png` });
-    if (ctx.config.helpMessage) {
+    if (ctx.config.helpMessage && session?.platform !== 'qq') {
       message = h('p', ctx.config.helpMessage, message);
     }
     return message;
@@ -753,7 +760,32 @@ export const apply = (ctx: Context) => {
     const trimmedContent = content.trim();
     const lowerContent = trimmedContent.toLowerCase();
 
-    if ('message' in session.event._data) {
+    // ── 位置消息 → 附近机厅探索 ──────────────────────────
+    const isOfficial = session.platform === 'qq';
+
+    let parsed:
+      | { latitude: string; longitude: string; name: string }
+      | { name: string; candidates: { address: string; name?: string }[] }
+      | undefined;
+    if (isOfficial) {
+      const ark = (
+        session.event._data as {
+          d?: { ark_data?: { ark_type?: string; fields?: { address?: string; desc?: string } } };
+        }
+      )?.d?.ark_data;
+      if (ark?.ark_type === 'map' && ark.fields) {
+        const arkAddress = ark.fields.address?.trim() || '';
+        const arkDesc = ark.fields.desc?.trim() || '';
+
+        const candidates: { address: string; name?: string }[] = [];
+        if (arkAddress && arkDesc) candidates.push({ address: arkAddress, name: arkDesc });
+        if (arkAddress) candidates.push({ address: arkAddress });
+        else if (arkDesc) candidates.push({ address: arkDesc });
+        if (candidates.length) {
+          parsed = { name: arkDesc, candidates };
+        }
+      }
+    } else if ('message' in session.event._data) {
       const rawMessage = session.event._data.message;
 
       let element: string | (typeof session.event._data.message)[number];
@@ -765,7 +797,7 @@ export const apply = (ctx: Context) => {
           element = tryParseCqJson(element) || { type: 'text', data: element };
         }
       } else {
-        element = rawMessage[0];
+        return;
       }
 
       if (
@@ -776,103 +808,196 @@ export const apply = (ctx: Context) => {
       ) {
         const data = JSON.parse(element.data.data);
         if (data.view === 'LocationShare' && 'Location.Search' in data.meta) {
-          const settings = (await ctx.database.get('discoverySettings', { channelId }))[0];
-          if (settings?.off) {
-            return;
-          }
           const query = data.meta['Location.Search'];
-          const name = query.name;
-          const latitude = query.lat;
-          const longitude = query.lng;
-          if (latitude && longitude) {
-            // 立即回应请求：给原消息贴一个表情，让用户知道机器人已收到
-            // 并正在处理（NapCat 扩展接口，其他适配器上自动跳过）
-            try {
-              const onebot = (
-                session as unknown as {
-                  onebot?: {
-                    setMsgEmojiLike?: (
-                      messageId: string,
-                      emojiId: string,
-                      set?: boolean
-                    ) => Promise<void>;
-                  };
-                }
-              ).onebot;
-              if (onebot?.setMsgEmojiLike && session.messageId) {
-                await onebot.setMsgEmojiLike(session.messageId, '124');
-              }
-            } catch (error) {
-              ctx.logger('nearcade').warn('设置消息表情回应失败：', error);
-            }
-            const radius = settings?.radius || 10;
-            const result = await client.discoverArcades(latitude, longitude, radius, name);
-            if (typeof result === 'string') {
-              await session.send(`查询附近机厅失败：${result}`);
-              return;
-            }
-            const lines = [];
-            const mapConfig = ctx.config.discoverMap;
-            // 地图渲染与文本构建并行进行：文本结果先发送、不等地图就绪；
-            // 渲染失败时记录日志并跳过地图发送
-            const mapPromise =
-              result.shops.length && mapConfig?.enabled !== false
-                ? renderDiscoverMap(result, {
-                    basemaps: mapConfig?.basemaps,
-                    fontPath: mapConfig?.fontPath,
-                    walkLines: mapConfig?.walkLines
-                  }).catch((error) => {
-                    ctx.logger('nearcade').warn('渲染发现结果地图失败：', error);
-                    return null;
-                  })
-                : null;
-            if (result.shops.length) {
-              lines.push(
-                `${name ? `「${name}」` : ''}周围 ${result.radius} 千米 · ${radiusTravelTime(result.radius)}内找到以下机厅：`
-              );
-              for (const [index, shop] of result.shops.entries()) {
-                let reporter: string | null = null;
-                const currentAttendance = shop.currentReportedAttendance;
-                if (currentAttendance) {
-                  const reportedBySelf = currentAttendance.reportedBy === ctx.config.selfId;
-                  if (reportedBySelf) {
-                    const report = await getReport(shop.id);
-                    reporter = report ? `${report.reporterName} (${report.reporterId})` : null;
-                  } else {
-                    const user = currentAttendance.reporter;
-                    reporter = user.displayName || `@${user.name}`;
-                  }
-                }
-                lines.push(
-                  `${index + 1}.「${shop.name}」${formatDistance(shop.distance)} ${shop.totalAttendance} 人${reporter && currentAttendance ? ` [${reporter} @ ${new Date(currentAttendance.reportedAt).toLocaleTimeString()}]` : ''}`
-                );
-              }
-            } else {
-              lines.push(
-                `${name ? `「${name}」` : ''}周围 ${result.radius} 千米 · ${radiusTravelTime(result.radius)}内未找到机厅。`
-              );
-            }
-            lines.push(
-              `有关更多信息，请访问 ${compressDiscoverUrl(latitude, longitude, radius, name, urlBase)}`
-            );
-            const message = lines.join('\n');
-            await session.send(result.shops.length > 3 ? toForwarded(message) : message);
-            // 地图图片以引用回复的形式发送，明确对应哪条请求
-            if (mapPromise) {
-              const image = await mapPromise;
-              if (image) {
-                await session.send(
-                  session.messageId
-                    ? [h.quote(session.messageId), h.image(image, 'image/webp')]
-                    : h.image(image, 'image/webp')
-                );
-              }
-            }
-            return;
+          if (query.lat && query.lng) {
+            parsed = { latitude: query.lat, longitude: query.lng, name: query.name ?? '' };
           }
         }
       }
     }
+
+    if (parsed) {
+      const settings = (await ctx.database.get('discoverySettings', { channelId }))[0];
+      if (settings?.off) {
+        return;
+      }
+
+      let location: { latitude: string; longitude: string; name: string };
+      if ('candidates' in parsed) {
+        let geocoded: GeocodeResponse | undefined;
+        let lastError: string | undefined;
+        for (const candidate of parsed.candidates) {
+          const result = await client.geocode(candidate.address, candidate.name);
+          if (typeof result === 'string') {
+            lastError = result;
+            continue;
+          }
+          if (result.results.length) {
+            geocoded = result;
+            break;
+          }
+        }
+        if (!geocoded) {
+          await session.send(
+            lastError
+              ? `查询附近机厅失败：位置解析失败（${lastError}）`
+              : '查询附近机厅失败：未能解析该位置的坐标。'
+          );
+          return;
+        }
+        const point = geocoded.results[0].location;
+        location = {
+          latitude: String(point.latitude),
+          longitude: String(point.longitude),
+          name: parsed.name
+        };
+      } else {
+        location = { ...parsed };
+      }
+      const { latitude, longitude, name } = location;
+      // 立即回应请求：给原消息贴一个表情，让用户知道机器人已收到
+      try {
+        const onebot = (
+          session as unknown as {
+            onebot?: {
+              setMsgEmojiLike?: (
+                messageId: string,
+                emojiId: string,
+                set?: boolean
+              ) => Promise<void>;
+            };
+          }
+        ).onebot;
+        if (session.platform === 'onebot' && onebot?.setMsgEmojiLike && session.messageId) {
+          await onebot.setMsgEmojiLike(session.messageId, '124');
+        }
+      } catch (error) {
+        ctx.logger('nearcade').warn('设置消息表情回应失败：', error);
+      }
+      const radius = settings?.radius || 10;
+      const result = await client.discoverArcades(latitude, longitude, radius, name);
+      if (typeof result === 'string') {
+        await session.send(`查询附近机厅失败：${result}`);
+        return;
+      }
+      const mapConfig = ctx.config.discoverMap;
+      // 地图渲染与文本构建并行进行：文本结果先发送、不等地图就绪；
+      // 渲染失败时记录日志并跳过地图发送
+      const mapPromise =
+        result.shops.length && mapConfig?.enabled !== false
+          ? renderDiscoverMap(result, {
+              basemaps: mapConfig?.basemaps,
+              fontPath: mapConfig?.fontPath,
+              walkLines: mapConfig?.walkLines,
+              format: isOfficial ? 'png' : 'webp'
+            }).catch((error) => {
+              ctx.logger('nearcade').warn('渲染发现结果地图失败：', error);
+              return null;
+            })
+          : null;
+      const headerBase = `${name ? `「${name}」` : ''}周围 ${result.radius} 千米 · ${radiusTravelTime(result.radius)}内`;
+      const buildHeader = (count: number, page = 1, pageCount = 1) => {
+        if (!count) return `${headerBase}未找到机厅。`;
+        const pageLabel = pageCount > 1 ? `（第 ${page}/${pageCount} 页）` : '';
+        return `${headerBase}找到以下机厅${pageLabel}：`;
+      };
+      const bodyLines: string[] = [];
+      for (const [index, shop] of result.shops.entries()) {
+        let reporter: string | null = null;
+        const currentAttendance = shop.currentReportedAttendance;
+        if (currentAttendance) {
+          const reportedBySelf = currentAttendance.reportedBy === ctx.config.selfId;
+          if (reportedBySelf) {
+            const report = await getReport(shop.id);
+            reporter = report ? `${report.reporterName} (${report.reporterId})` : null;
+          } else {
+            const user = currentAttendance.reporter;
+            reporter = user.displayName || `@${user.name}`;
+          }
+        }
+        const suffix =
+          `${formatDistance(shop.distance)} ${shop.totalAttendance} 人` +
+          (reporter && currentAttendance
+            ? ` [${reporter} @ ${new Date(currentAttendance.reportedAt).toLocaleTimeString()}]`
+            : '');
+
+        bodyLines.push(
+          isOfficial
+            ? `**${index + 1}.** [${escapeMarkdownLinkText(`「${shop.name}」`)}](${urlBase}/shops/${shop.id}) ${suffix}`
+            : `${index + 1}.「${shop.name}」${suffix}`
+        );
+      }
+      const discoverUrl = compressDiscoverUrl(
+        Number(latitude),
+        Number(longitude),
+        radius,
+        name,
+        urlBase
+      );
+      const footer = `有关更多信息，请访问 ${discoverUrl}`;
+
+      if (isOfficial) {
+        const pages: string[][] = [];
+        for (let i = 0; i < bodyLines.length; i += MARKDOWN_RESULTS_PER_PAGE) {
+          pages.push(bodyLines.slice(i, i + MARKDOWN_RESULTS_PER_PAGE));
+        }
+        if (!pages.length) pages.push([]);
+        const buildPage = (pageIndex: number) => {
+          const lines = pages[pageIndex] ?? [];
+          return [buildHeader(lines.length, pageIndex + 1, pages.length), lines.join('\n')]
+            .filter(Boolean)
+            .join('\n\n');
+        };
+        const linkButton = () =>
+          h('button', { type: 'link', href: discoverUrl, class: 'primary' }, '查看更多');
+        const sendPage = async (target: Session, pageIndex: number) => {
+          const message = buildPage(pageIndex);
+          const buttons = [linkButton()];
+          if (pages.length > pageIndex + 1) {
+            buttons.unshift(
+              h(
+                'button',
+                {
+                  action: async (interaction: Session) => {
+                    await sendPage(interaction, pageIndex + 1);
+                  }
+                },
+                '下一页'
+              )
+            );
+          }
+          try {
+            const sent = await target.send([h('qq:markdown', message), ...buttons]);
+            if (sent.length) return;
+          } catch (error) {
+            ctx.logger('nearcade').warn('发送发现结果（含键盘）失败：', error);
+          }
+          // 键盘被拒时回退为纯 markdown；再失败只记录日志，避免交互回调抛错。
+          try {
+            await target.send(h('qq:markdown', message));
+          } catch (error) {
+            ctx.logger('nearcade').warn('发送发现结果失败：', error);
+          }
+        };
+        await sendPage(session, 0);
+      } else {
+        const message = [buildHeader(bodyLines.length), ...bodyLines, footer].join('\n');
+        await session.send(result.shops.length > 3 ? toForwarded(message) : message);
+      }
+
+      if (mapPromise) {
+        const image = await mapPromise;
+        if (image) {
+          await session.send(
+            !isOfficial && session.messageId
+              ? [h.quote(session.messageId), h.image(image, 'image/webp')]
+              : h.image(image, 'image/png')
+          );
+        }
+      }
+      return;
+    }
+
     // 仅对纯文本消息做机厅查询/上报解析：卡片、图片、Markdown、转发等消息的
     // 渲染文本（JSON 片段、图片 URL、打卡播报等）会拼进 content 并被逐行解析，
     // 触发误报查询；引用回复的 quote 元素由适配器移出 elements，不影响判定。
@@ -880,7 +1005,7 @@ export const apply = (ctx: Context) => {
       return;
     }
     if (lowerContent === 'nearcade' && ctx.config.helpOnMention !== false) {
-      await session.send(getHelpMessage());
+      await session.send(getHelpMessage(session));
       return;
     }
     if (attendanceQuerySuffix.some((suffix) => lowerContent.endsWith(suffix))) {
@@ -1169,8 +1294,8 @@ export const apply = (ctx: Context) => {
     );
   });
 
-  ctx.command('nearcade', '查看 nearcade 帮助').action(() => {
-    return getHelpMessage();
+  ctx.command('nearcade', '查看 nearcade 帮助').action(({ session }) => {
+    return getHelpMessage(session);
   });
 
   ctx
