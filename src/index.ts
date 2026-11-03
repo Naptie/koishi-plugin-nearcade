@@ -1070,12 +1070,16 @@ export const apply = (ctx: Context) => {
       if (mapPromise) {
         const image = await mapPromise;
         if (image) {
-          await sendMessage(
-            session,
-            !sendOfficial && session.messageId
-              ? [h.quote(session.messageId), h.image(image, 'image/webp')]
-              : h.image(image, sendOfficial ? 'image/png' : 'image/webp')
-          );
+          const quoteId = sendOfficial
+            ? coordinator.getOfficialQuoteId(session)
+            : session.messageId;
+          const imageElement = h.image(image, sendOfficial ? 'image/png' : 'image/webp');
+          try {
+            await sendMessage(session, quoteId ? [h.quote(quoteId), imageElement] : imageElement);
+          } catch (error) {
+            ctx.logger('nearcade').warn('发送地图失败：', error);
+            await sendMessage(session, imageElement);
+          }
         }
       }
       return;

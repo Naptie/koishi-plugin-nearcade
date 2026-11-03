@@ -85,6 +85,12 @@ export interface CoordinationRoute {
   qqGroupOpenid?: string;
   qqSelfId?: string;
   officialSession?: Session;
+  /**
+   * 官方侧收到的同一消息的引用索引（message_scene.ext 里的 msg_idx，
+   * REFIDX_...）。QQ 官方 message_reference 引用回复需要该索引，
+   * 而非 ROBOT1.0_... 消息 id。
+   */
+  officialQuoteId?: string;
 }
 
 interface OneBotGroupRef {
@@ -98,6 +104,10 @@ interface OfficialObservation {
   session: Session;
   normalized: string;
   timestamp: number;
+  /** 引用索引（msg_idx），用于官方 message_reference 引用回复 */
+  msgIdx?: string;
+  /** 卡片匹配键（腾讯地图 POI 名称+地址），用于卡片消息的跨适配器内容匹配 */
+  cardKey?: string;
 }
 
 const GROUP_INFO_TTL = 5 * 60 * 1000;
@@ -133,6 +143,78 @@ const normalizeMessageContent = (content: string) =>
     .replace(/<quote[^>]*>[\s\S]*?<\/quote>/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+
+/** QQ 官方消息事件原始负载中与本插件相关的字段 */
+interface OfficialRawEvent {
+  ark_data?: unknown;
+  message_scene?: {
+    ext?: string[];
+  };
+}
+
+const MSG_IDX_PREFIX = 'msg_idx=';
+
+/**
+ * 提取官方消息事件的引用索引（msg_idx）：QQ 官方 message_reference 的
+ * message_id 需要消息事件 message_scene.ext 里的 msg_idx（REFIDX_...），
+ * 而非 ROBOT1.0_... 消息 id。
+ */
+const extractOfficialQuoteId = (session: Session): string | undefined => {
+  const d = (session.event._data as { d?: OfficialRawEvent } | undefined)?.d;
+  const ext = d?.message_scene?.ext;
+  return ext
+    ?.find((item) => typeof item === 'string' && item.startsWith(MSG_IDX_PREFIX))
+    ?.slice(MSG_IDX_PREFIX.length);
+};
+
+/** 卡片匹配键字段规范化：与 normalizeMessageContent 一致地压缩空白 */
+const normalizeCardKeyPart = (value: unknown): string =>
+  typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+
+/**
+ * 卡片匹配键：位置卡片由 QQ 客户端内置腾讯地图生成、无用户输入，同一条
+ * 分享在两侧的 POI 名称与地址逐字节一致（OneBot: Location.Search 的
+ * name/address，官方: ark fields 的 desc/address），组合两者做全等比较，
+ * 地址可区分同名连锁门店。字段来自同一 POI 记录，两侧要么都有、要么都无；
+ * 两侧均无内容时不产生键。
+ */
+const buildCardKey = (name: unknown, address: unknown): string | undefined => {
+  const namePart = normalizeCardKeyPart(name);
+  const addressPart = normalizeCardKeyPart(address);
+  if (!namePart && !addressPart) return undefined;
+  return `${namePart}\u0000${addressPart}`;
+};
+
+const extractOfficialCardKey = (session: Session): string | undefined => {
+  const d = (session.event._data as { d?: OfficialRawEvent } | undefined)?.d;
+  const ark = d?.ark_data as { fields?: Record<string, unknown> } | undefined;
+  return buildCardKey(ark?.fields?.desc, ark?.fields?.address);
+};
+
+/**
+ * OneBot 侧卡片匹配键：位置分享 JSON 卡片的 Location.Search.name/address，
+ * 与官方 ark fields 的 desc/address 同源（同一腾讯地图 POI）。
+ */
+const extractOnebotCardKey = (session: Session): string | undefined => {
+  const element = session.elements?.find((item) => item.type === 'json');
+  const raw = element?.attrs?.data;
+  if (typeof raw !== 'string') return;
+  try {
+    const card = JSON.parse(raw) as {
+      view?: unknown;
+      meta?: { 'Location.Search'?: Record<string, unknown> };
+    };
+    if (card.view !== 'LocationShare') return;
+    const search = card.meta?.['Location.Search'];
+    return buildCardKey(search?.name, search?.address);
+  } catch {
+    return undefined;
+  }
+};
+
+/** 去除消息中的引用元素：官方发送失败回退时，避免引用元素再次触发同类错误 */
+const stripQuote = (content: h.Fragment): h.Fragment =>
+  h.normalize(content).filter((element) => element.type !== 'quote');
 
 const stripMarkdown = (text: string) =>
   text
@@ -297,7 +379,7 @@ export class Coordinator {
     const qqBot = session.bot as unknown as QQBotLike;
     const snapshot = await this.getQQGroupInfo(qqBot, openid);
     const qqInfo = snapshot?.info;
-    this.rememberOfficial(session, openid);
+    const observation = this.rememberOfficial(session, openid);
     if (qqInfo) {
       this.unlinkedOfficial.set(openid, {
         at: Date.now(),
@@ -324,7 +406,8 @@ export class Coordinator {
       onebotGroupId: link?.onebotGroupId,
       qqGroupOpenid: openid,
       qqSelfId: qqBot.selfId,
-      officialSession: session
+      officialSession: session,
+      officialQuoteId: observation.msgIdx
     };
     return route;
   }
@@ -362,7 +445,8 @@ export class Coordinator {
       onebotGroupId: link?.onebotGroupId ?? groupId,
       qqGroupOpenid: link?.qqGroupOpenid,
       qqSelfId: link?.qqSelfId,
-      officialSession: passive
+      officialSession: passive?.session,
+      officialQuoteId: passive?.msgIdx
     };
     return route;
   }
@@ -392,6 +476,8 @@ export class Coordinator {
     const qqBot = this.getQQBot(route.qqSelfId);
     if (!qqBot) return this.nativeSend(session, content, options);
 
+    this.refreshOfficialMatch(session, route);
+
     let lastError: unknown;
     for (let attempt = 0; attempt <= OFFICIAL_SEND_RETRY_DELAYS.length; attempt++) {
       try {
@@ -415,7 +501,9 @@ export class Coordinator {
     }
 
     this.logger.warn('通过 QQ 官方适配器发送失败，回退到 OneBot：', lastError);
-    const fallback = session.platform === 'onebot' ? degradeForOneBot(content) : content;
+    // 回退到官方 native 发送时同样去掉引用元素，避免同一错误再次出现
+    const fallback =
+      session.platform === 'onebot' ? degradeForOneBot(content) : stripQuote(content);
     return this.nativeSend(session, fallback, options);
   }
 
@@ -747,31 +835,63 @@ export class Coordinator {
     return !!ref && ref.bot.status === 1;
   }
 
-  private rememberOfficial(session: Session, openid: string) {
-    const list = this.recentOfficial.get(openid) ?? [];
-    const timestamp = session.timestamp ?? Date.now();
-    list.push({
+  private rememberOfficial(session: Session, openid: string): OfficialObservation {
+    const observation: OfficialObservation = {
       session,
       normalized: normalizeMessageContent(session.content ?? ''),
-      timestamp
-    });
+      timestamp: session.timestamp ?? Date.now(),
+      msgIdx: extractOfficialQuoteId(session),
+      cardKey: extractOfficialCardKey(session)
+    };
+    const list = this.recentOfficial.get(openid) ?? [];
+    list.push(observation);
     const cutoff = Date.now() - PASSIVE_WINDOW;
     this.recentOfficial.set(
       openid,
       list.filter((item) => item.timestamp >= cutoff).slice(-MAX_RECENT_OFFICIAL)
     );
+    return observation;
   }
 
-  private findPassive(openid: string, session: Session) {
+  private findPassive(openid: string, session: Session): OfficialObservation | undefined {
     const list = this.recentOfficial.get(openid);
     if (!list?.length) return;
     const timestamp = session.timestamp ?? Date.now();
     const normalized = normalizeMessageContent(session.content ?? '');
+    const cardKey = extractOnebotCardKey(session);
+    let card: OfficialObservation | undefined;
     for (const item of list) {
       if (Date.now() - item.timestamp > PASSIVE_WINDOW) continue;
       if (Math.abs(item.timestamp - timestamp) > PASSIVE_MATCH_WINDOW) continue;
-      if (item.normalized === normalized) return item.session;
+      if (item.normalized === normalized) return item;
+      if (cardKey && item.cardKey === cardKey) card = item;
     }
+    return card;
+  }
+
+  /**
+   * 发送前重新匹配官方侧收到的同一消息。卡片消息的官方事件可能比 OneBot
+   * 事件晚到，prepare 阶段匹配不到；发送前再试一次能显著提高命中率。
+   */
+  private refreshOfficialMatch(session: Session, route: CoordinationRoute) {
+    if (route.receivePlatform !== 'onebot' || !route.qqGroupOpenid) return;
+    const passive = this.findPassive(route.qqGroupOpenid, session);
+    if (passive) {
+      route.officialSession = passive.session;
+      route.officialQuoteId = passive.msgIdx;
+    }
+  }
+
+  /**
+   * 获取官方侧引用回复所需的 msg_idx。官方机器人收到消息（无论经由本
+   * session 还是经协调器匹配到的同一消息）时才有值；匹配不到时返回
+   * undefined，调用方应退化为不引用发送。
+   */
+  getOfficialQuoteId(session: Session): string | undefined {
+    const route = this.routes.get(session);
+    if (!route) return;
+    this.refreshOfficialMatch(session, route);
+    return route.officialQuoteId;
   }
 }
 
