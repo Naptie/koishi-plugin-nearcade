@@ -47,7 +47,13 @@ export class Client {
     return response.json() as Promise<T>;
   }
 
-  async discoverArcades(latitude: string, longitude: string, radius: number, name: string, limit?: number) {
+  async discoverArcades(
+    latitude: string,
+    longitude: string,
+    radius: number,
+    name: string,
+    limit?: number
+  ) {
     return this.request<DiscoverResponse>(
       `/discover?latitude=${latitude}&longitude=${longitude}&radius=${radius}${
         limit ? `&limit=${limit}` : ''

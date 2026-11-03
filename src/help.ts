@@ -92,8 +92,7 @@ const TEXT_SHADOW = {
  */
 const GLOW_EXTENDED_HEAVY = '"Glow Sans SC Extended Heavy", "未来荧黑 Extended Heavy"';
 const GLOW_EXTENDED_MEDIUM = '"Glow Sans SC Extended Medium", "未来荧黑 Extended Medium"';
-const GLOW_EXTENDED_EXTRA_BOLD =
-  '"Glow Sans SC Extended ExtraBold", "未来荧黑 Extended ExtraBold"';
+const GLOW_EXTENDED_EXTRA_BOLD = '"Glow Sans SC Extended ExtraBold", "未来荧黑 Extended ExtraBold"';
 const GLOW_NORMAL_MEDIUM = '"Glow Sans SC Normal Medium", "未来荧黑 Normal Medium"';
 
 /** 各处文本的字重与展示字体族 */
@@ -549,7 +548,13 @@ const drawTable = (
 
   // 表头
   const headerBaseline = cellBaseline(top, headerHeight, headerFont);
-  drawSegments(g, [{ text: '功能', color: 'white' }], left + columnOffsets[0] + PAD_X * SCALE, headerBaseline, headerFont);
+  drawSegments(
+    g,
+    [{ text: '功能', color: 'white' }],
+    left + columnOffsets[0] + PAD_X * SCALE,
+    headerBaseline,
+    headerFont
+  );
   drawSegments(
     g,
     [{ text: '指令格式', color: 'white' }],
