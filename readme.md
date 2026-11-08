@@ -14,3 +14,12 @@ The official Koishi plugin for nearcade.
 - Per-channel discovery settings (`nearcade.discover`), privacy, search and binding commands.
 - Unbound-arcade autosearch (`nearcade.autosearch`): report attendance at any registered arcade
   by typing its name plus a count without binding it first.
+- Dual-adapter coordination: when a group is served by both an official QQ bot and a OneBot
+  implementation, replies are deduplicated into a single official-voice response with
+  adaptive rendering; `@`-mentioning either bot lets that bot answer directly.
+
+## Requirements
+
+Since 0.7.0, multi-adapter coordination is provided by
+[koishi-plugin-coordinator](https://www.npmjs.com/package/koishi-plugin-coordinator), which is
+a required peer dependency.
